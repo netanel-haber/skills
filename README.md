@@ -1,4 +1,4 @@
-| Skill | What it does |
+| Skill |  |
 |---|---|
 | [ez-review](ez-review) | Makes one HTML review page for GitHub PRs, with a note next to each diff hunk. |
 | [sem-compress](sem-compress) | Makes code smaller. It removes repetition, dead code and needless layers, and it keeps every feature. |
