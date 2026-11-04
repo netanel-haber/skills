@@ -27,7 +27,10 @@ Follow the user's instructions first, then the host project's look and rules, th
    - On a narrow screen, fold the controls into one summary line above the answer. Show each table row as a block, with each cell under its column name.
 4. **Cut.**
    - Decoration: gradients, glows, shadows, illustrations, emoji, and icons that repeat their label.
-   - Text that repeats the data, the heading or the control label.
+   - Sentences. The page is informative, not talkative: a value goes in a labeled field, a key goes in a legend, and a count is the link to what it counts ("10 snippets ↗").
+   - Text that repeats the data, the heading, the control label, or what is obvious (a "shell" label on a shell command).
+   - Each row that does not earn its height: a title above an obvious card, a description blurb, a head row that repeats the breadcrumbs. Merge rows instead: the tabs and the meta line in one row, the count and the chart tools in one row.
+   - Details that the reader does not use. A label shows what the reader chooses by (GPUs, throughput), not internal settings (TP, MTP, kernel names). A chart shows only the points that answer the question.
    - Sales words, slogans and placeholder text.
    - Fake precision: more digits than the measurement supports.
    - Each control or link that does nothing. In a mock too, every control works.
@@ -35,14 +38,15 @@ Follow the user's instructions first, then the host project's look and rules, th
 5. **Build.**
    - Use the host's stack. If there is no host, write one HTML file with inline CSS and JS and no build step.
    - Put the data in one object, and make every view from it. Then two views cannot show two values for one fact.
-   - Keep the selection in the URL, so that a link opens the same view.
+   - Keep the selection in the URL, so that a link opens the same view. Each value in a link is a name that says what it is (`point=tp4-ep-mtp5-c8`), not an index. A name never changes, and two items never share one.
+   - A link that does not make sense opens the closest view under a red banner. The banner has one row for each bad part: the part, a short reason, and the valid choices as links.
    - Use inline SVG for small charts. Use a chart library only if the host already uses one.
    - Label mock data once, near the top of the page.
 6. **Check in a browser, and look at every screenshot.**
    - Widths: 1920, 1440, 1024 and 390 px. No horizontal scroll, no clipped text, no overlap, and no heading that ends in one word on its own line.
    - States: default, hover, focus, empty, error, loading, blocked and each data state. Open each one from its URL.
    - Click every control, then read the result back from the page: the URL, the title, the copied text. Do one pass with the keyboard only.
-   - When a state changes, the layout does not jump. Reserve the space.
+   - When a state changes, the layout does not jump. Reserve the space only where something below would move; a reserved band with nothing below it is a defect.
    - The console shows no errors and no warnings, and no request fails.
    - Contrast is at least 4.5:1 for text and 3:1 for chart lines and control borders. Measure the host's colors too.
    - For each number on the page, find its source and its unit.
@@ -52,9 +56,12 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Look
 
 - Use the host's theme. If the host has only a dark theme, do not add a light theme.
-- Use one accent color, only for the primary action, the selection and links.
+- Use one accent color, only for the primary action, the selection and links. If the organization has a brand color, the accent is that color, such as NVIDIA green (#76b900).
+- Navigate with breadcrumbs in the header, each a dropdown of its choices, not with a sidebar. Group a long dropdown (`optgroup`) by family, and sort sizes as numbers.
 - Status colors (green, amber, red, gray) mean status only. Always put a word next to the color.
 - Use two font weights and at most four text sizes. Make hierarchy with size and weight, not with color.
+- Thin, dim text on a dark background looks fragile. Use weight 500 for body and code text, and bright secondary text (about #a6b4c8 on #020618).
+- Embed the monospace font (a variable WOFF2, Latin subset), so that code looks the same on every machine.
 - Use tabular figures (`font-variant-numeric: tabular-nums`) for each number in a column and each value that changes.
 - Use a monospace font for commands, flags, paths, hashes and identifiers.
 - Keep each range, value with its unit, and identifier on one line: 26–28%, PR #55390. Balance the lines of headings (`text-wrap: balance`).
@@ -64,6 +71,7 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Numbers
 
 - Give each number its unit, in its label or in its column header: "Output TPS/GPU", "TTFT (ms)".
+- Show the numbers that the reader compares as tiles with large figures. Put the environment that measured them (version, image, checkpoint, session, workload) in its own box, apart from what the page recommends.
 - Use thousands separators, and the same number of decimals in a column: 1,137 and 95.7%.
 - Give measured values their spread and count when they have them: 1,751.5 ± 3.8 (n=4).
 - Show a change as before → after, and put the result in bold: 92.02 → **95.71**.
@@ -86,7 +94,10 @@ Follow the user's instructions first, then the host project's look and rules, th
 
 - Label each axis with the metric and the unit. Use round tick values in the unit of the data. A tick never shows clock time with milliseconds.
 - With four series or fewer, put the labels on the lines, not in a separate legend.
-- Draw a constraint, such as a floor or a target, as a line with its value. Put a ring on the chosen point.
+- Draw a constraint, such as a floor or a target, as a dashed line with its value. Put a ring on the chosen point.
+- Each axis ends at the round tick above its largest value, zoomed or not.
+- A drag on the plot zooms in on the points in the rectangle. "Clear zoom" takes the place of the zoom hint, in the row above the chart.
+- The details of the selected point go under the chart.
 - Mark each limit that the data shows, such as a cliff or an overflow. If a note collides with the data or a label, move it to the caption.
 - If tick labels touch, show every second label.
 - Show the exact values on hover and on keyboard focus.
@@ -97,6 +108,11 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Commands
 
 - The copy button copies exactly the text on the screen. It confirms with a word, then goes back.
+- The copy button is in the box that it copies, on a tab on the box's top edge: it takes no height and covers no text. A long command also has "one line", which copies it without its line continuations.
+- A selection of a command copies only the command. Draw every label, group name and link arrow with CSS (`::before`, `::after`, `attr()`), and make each line a block.
+- Highlight shell, and only shell, with one small tokenizer: the command, flags, numbers, other values, strings, comments and line continuations. Each has a visible color; continuations are quiet but readable.
+- Group the flags by subsystem (parallelism, MoE, KV cache, Mamba, speculative decoding, vision), with a faint colored edge and the group name small and faint on the right of its first line. Flags that match no group come first, with no name. A long line pushes the name down; it never runs into it.
+- Where many commands share most flags, show the shared lines first and each command's own lines after them, each part named on its right. Changing the command changes only its own part.
 - Put one flag on each line, with a line continuation. Use flag forms that need no JSON quotes.
 - Pin the version: an image tag or digest, or a commit.
 - Put environment variables before the command, one on each line.
@@ -114,6 +130,8 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Controls
 
 - Use native elements: `button`, `select`, `input`, `details` and `a`. Each one shows a visible focus ring.
+- A click picks a point. A separate checkbox for the same choice is noise; give "Select all" and "Unselect all" instead.
+- Link every external thing that has a page: the model card (only if it exists), the image tag, the release, the commit, the source run. Draw the link arrow with CSS.
 - Use a segmented control for two to five options, and a select for more.
 - Make each control target at least 32 px high.
 - Give each hover effect to keyboard focus too.
