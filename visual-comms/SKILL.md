@@ -9,7 +9,7 @@ Follow the user's instructions first, then the host project's look and rules, th
    - Write down the questions that the reader brings, in order. The answer to the first question goes at the top.
    - For each answer, list the facts: values, units, conditions, versions, dates and sources. Mark each fact that is not a measurement, such as an estimate, a candidate or sample data.
    - Read the host: its CSS tokens, components, states and data API. Open it in a browser and take screenshots. A new page uses the same tokens and components.
-   - If there is no host, use one dark theme, the system font stack and one accent color.
+   - If there is no host, use one light theme, the system font stack and one accent color.
 2. **Choose one form for each fact.**
    - One result: the number, its unit and its state, with its conditions next to it.
    - A few values to compare: a table.
@@ -43,20 +43,27 @@ Follow the user's instructions first, then the host project's look and rules, th
    - Use inline SVG for small charts. Use a chart library only if the host already uses one.
    - Label mock data once, near the top of the page.
 6. **Check in a browser, and look at every screenshot.**
-   - Widths: 1920, 1440, 1024 and 390 px. No horizontal scroll, no clipped text, no overlap, and no heading that ends in one word on its own line.
+   - Widths: 1920, 1440, 1024 and 390 px. Skip 390 px if the page is desktop-only, such as a tool behind a VPN. No horizontal scroll, no clipped text, no overlap, and no heading that ends in one word on its own line.
    - States: default, hover, focus, empty, error, loading, blocked and each data state. Open each one from its URL.
+   - Open a bad link once, without a reload. A page that cleans its URL on load shows the clean link after a reload, not the bad one.
    - Click every control, then read the result back from the page: the URL, the title, the copied text. Do one pass with the keyboard only.
    - When a state changes, the layout does not jump. Reserve the space only where something below would move; a reserved band with nothing below it is a defect.
    - The console shows no errors and no warnings, and no request fails.
    - Contrast is at least 4.5:1 for text and 3:1 for chart lines and control borders. Measure the host's colors too.
    - For each number on the page, find its source and its unit.
    - Put the page next to the host at the same width. Fix each difference that the host does not explain.
+   - Before you remove a feature or a theme, take screenshots of every state. After it, compare them pixel by pixel. Each difference outside the removed part is a regression.
 7. **Show** the screenshots and the address before you publish. Say which data is mock data.
 
 ## Look
 
 - Use the host's theme. If the host has only a dark theme, do not add a light theme.
-- Use one accent color, only for the primary action, the selection and links. If the organization has a brand color, the accent is that color, such as NVIDIA green (#76b900).
+- Use one theme on a page. The one exception is the star, the command that the reader came for: it can stay dark on a light page. Each other box follows the page, or the eye jumps between themes.
+- A light theme is not a dark theme with its colors flipped. Tint the page and the cards with one hue, a little apart. Plain grey with pure white cards looks corporate and glares.
+- Use two surface colors (the page and the card) and at most one tint that means something. A box inside a card takes the card's color and a border; a third, close tint looks like a hole.
+- The star fills its card edge to edge. Do not frame it twice, and do not put a glow or a colored border around it.
+- Use one accent color, only for the primary action, the selection and links. If the organization has a brand color, the accent is exactly that color, such as NVIDIA green (#76b900). Do not darken it.
+- Where the accent fails contrast as text, as green does on a light page, use it only for fills, lines, underlines and borders. A link is dark text with a 2 px accent underline, and a button is an accent fill with dark text.
 - Navigate with breadcrumbs in the header, each a dropdown of its choices, not with a sidebar. Group a long dropdown (`optgroup`) by family, and sort sizes as numbers.
 - Status colors (green, amber, red, gray) mean status only. Always put a word next to the color.
 - Use two font weights and at most four text sizes. Make hierarchy with size and weight, not with color.
@@ -71,7 +78,8 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Numbers
 
 - Give each number its unit, in its label or in its column header: "Output TPS/GPU", "TTFT (ms)".
-- Show the numbers that the reader compares as tiles with large figures. Put the environment that measured them (version, image, checkpoint, session, workload) in its own box, apart from what the page recommends.
+- Show the numbers that the reader compares as one quiet row: small labels over figures a little larger than the text. Boxed tiles with large figures compete with the chart and the command.
+- Put the environment that measured the numbers (version, image, checkpoint, session, workload) in its own box, apart from what the page recommends.
 - Use thousands separators, and the same number of decimals in a column: 1,137 and 95.7%.
 - Give measured values their spread and count when they have them: 1,751.5 ± 3.8 (n=4).
 - Show a change as before → after, and put the result in bold: 92.02 → **95.71**.
@@ -95,6 +103,10 @@ Follow the user's instructions first, then the host project's look and rules, th
 - Label each axis with the metric and the unit. Use round tick values in the unit of the data. A tick never shows clock time with milliseconds.
 - With four series or fewer, put the labels on the lines, not in a separate legend.
 - Draw a constraint, such as a floor or a target, as a dashed line with its value. Put a ring on the chosen point.
+- Put one border around the whole graph, with its axes and labels inside, and padding. The graph keeps the card's color; do not give it a fill of its own.
+- Give each point a halo in the background color, so that close points and the line stay apart. Draw the ring once, above every point, with its own halo.
+- If two points sit closer than a marker's width, add an inset in an empty corner (the top right, for a frontier). It magnifies the chosen point until its nearest neighbor is clearly apart.
+- Mark the inset's window on the plot with a faint dashed square, but only when the square is larger than the ring.
 - Each axis ends at the round tick above its largest value, zoomed or not.
 - A drag on the plot zooms in on the points in the rectangle. "Clear zoom" takes the place of the zoom hint, in the row above the chart.
 - The details of the selected point go under the chart.
@@ -108,7 +120,8 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Commands
 
 - The copy button copies exactly the text on the screen. It confirms with a word, then goes back.
-- The copy button is in the box that it copies, on a tab on the box's top edge: it takes no height and covers no text. A long command also has "one line", which copies it without its line continuations.
+- The copy button is in the box that it copies, on a tab on the box's top edge: it takes no height and covers no text. Leave at least 8 px between the tab and the row above it.
+- A long command also has a button that copies it as one line, without its line continuations. Label it by what it removes: `no \`.
 - A selection of a command copies only the command. Draw every label, group name and link arrow with CSS (`::before`, `::after`, `attr()`), and make each line a block.
 - Highlight shell, and only shell, with one small tokenizer: the command, flags, numbers, other values, strings, comments and line continuations. Each has a visible color; continuations are quiet but readable.
 - Group the flags by subsystem (parallelism, MoE, KV cache, Mamba, speculative decoding, vision), with a faint colored edge and the group name small and faint on the right of its first line. Flags that match no group come first, with no name. A long line pushes the name down; it never runs into it.

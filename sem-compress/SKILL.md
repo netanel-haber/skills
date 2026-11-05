@@ -13,7 +13,7 @@ Make the code smaller in substance, not in appearance. A change counts only if t
 
 ## What counts
 
-- Remove dead code: unreachable branches, unused functions, exports, styles, selectors, variables, flags, config.
+- Remove dead code: unreachable branches, unused functions, exports, styles, selectors, variables, flags, config, and data fields that no code reads.
 - Merge duplicated logic: two functions that fetch-parse-map the same way, two near-identical render blocks, copy-pasted control flow, parallel tables that should be one.
 - Collapse layers: wrappers that only forward, helpers with one caller that read worse than their inlined body, abstractions with one implementation, indirection that exists for a past need.
 - Delegate to primitives the language, platform or project already has instead of reimplementing them.
