@@ -48,11 +48,15 @@ Follow the user's instructions first, then the host project's look and rules, th
    - Open a bad link once, without a reload. A page that cleans its URL on load shows the clean link after a reload, not the bad one.
    - Click every control, then read the result back from the page: the URL, the title, the copied text. Do one pass with the keyboard only.
    - When a state changes, the layout does not jump. Reserve the space only where something below would move; a reserved band with nothing below it is a defect.
+   - The page loads without a reflow: a skeleton at each box's final size holds its place, and the real content replaces it in one step. Nothing shows until all the data that decides the first view is in.
+   - The page requests only its own files. Decide everything else (a release name, a link target) from the repo's data, not from another host's API at load time.
+   - Switch between every pair of views, and back, and check that each shows its own data. A view that was built once and kept aside can keep the old data.
    - The console shows no errors and no warnings, and no request fails.
    - Contrast is at least 4.5:1 for text and 3:1 for chart lines and control borders. Measure the host's colors too.
    - For each number on the page, find its source and its unit.
    - Put the page next to the host at the same width. Fix each difference that the host does not explain.
    - Before you remove a feature or a theme, take screenshots of every state. After it, compare them pixel by pixel. Each difference outside the removed part is a regression.
+   - When the user watches a live reload, make each change in one write that leaves the page working, and look at the screenshots before the next change.
 7. **Show** the screenshots and the address before you publish. Say which data is mock data.
 
 ## Look
@@ -71,8 +75,13 @@ Follow the user's instructions first, then the host project's look and rules, th
 - Embed the monospace font (a variable WOFF2, Latin subset), so that code looks the same on every machine.
 - Use tabular figures (`font-variant-numeric: tabular-nums`) for each number in a column and each value that changes.
 - Use a monospace font for commands, flags, paths, hashes and identifiers.
+- Chart text (ticks, axis titles) differs from the page's text: monospace, in a quiet tint of the axis color, and not selectable.
 - Keep each range, value with its unit, and identifier on one line: 26–28%, PR #55390. Balance the lines of headings (`text-wrap: balance`).
-- Use one border radius for cards and one for controls, and 1 px borders. On a dark background, do not use shadows to separate cards.
+- Use one border radius for cards and one for controls. On a dark background, do not use shadows to separate cards.
+- On a light page, a 1 px light border looks brittle: give the cards 2 px. The dark star keeps 1 px, as a light rim around it frames it twice. Browsers round a fractional border down to whole pixels, so 1.5 px draws as 1 px.
+- Never use a dull grey for a surface, a chip or a muted control. Tint it with the page's hue or the accent.
+- The primary action is the one strong button. If the accent fails contrast with both dark and light text, make the button dark like the star, with the accent in its icon.
+- Turn off ligatures on the whole page (`font-variant-ligatures: none`, after every `font` shorthand, or with `!important`): a monospace font can join `###` into one glyph.
 - Style every native control for the theme. A white default input on a dark page is a bug.
 
 ## Numbers
@@ -102,13 +111,15 @@ Follow the user's instructions first, then the host project's look and rules, th
 
 - Label each axis with the metric and the unit. Use round tick values in the unit of the data. A tick never shows clock time with milliseconds.
 - With four series or fewer, put the labels on the lines, not in a separate legend.
-- Draw a constraint, such as a floor or a target, as a dashed line with its value. Put a ring on the chosen point.
+- Draw a constraint, such as a floor or a target, as a dashed line. Label it with its value, unless an axis tick already sits on it.
+- Mark the chosen point with a color of its own that no other point has, with good contrast, and a small arrow above it that points down and bobs a little (still under reduced motion). No ring.
 - Put one border around the whole graph, with its axes and labels inside, and padding. The graph keeps the card's color; do not give it a fill of its own.
-- Give each point a halo in the background color, so that close points and the line stay apart. Draw the ring once, above every point, with its own halo.
-- If two points sit closer than a marker's width, add an inset in an empty corner (the top right, for a frontier). It magnifies the chosen point until its nearest neighbor is clearly apart.
-- Mark the inset's window on the plot with a faint dashed square, but only when the square is larger than the ring.
-- Each axis ends at the round tick above its largest value, zoomed or not.
-- A drag on the plot zooms in on the points in the rectangle. "Clear zoom" takes the place of the zoom hint, in the row above the chart.
+- Give a chart a fixed shape (16:9), so that its height follows its width: never the window's height, and never the data.
+- Give each point a halo in the background color, so that close points and the line stay apart. Draw the chosen point once more, above every point.
+- Do not add an inset or a minimap: zoom serves close points.
+- Axes of amounts start at zero and end a little past the largest value. Tick the x axis at round steps that include each constraint.
+- A drag on the plot zooms to the rectangle as drawn, not to the tight extent of its points. The zoom hint and "Clear zoom" are a chip in the chart's top-right corner, with the other chips (the data's date, as a date-time that links to its commit).
+- Give the few points that a reader quotes (the best of each objective) a name and an icon. Draw each as a small disc with its icon inside, in place of its dot, and a little see-through. Name them in a boxed key in the plot's empty corner, show the name first in the hover tooltip, and use the same icon component wherever they appear.
 - The details of the selected point go under the chart.
 - Mark each limit that the data shows, such as a cliff or an overflow. If a note collides with the data or a label, move it to the caption.
 - If tick labels touch, show every second label.
@@ -127,7 +138,9 @@ Follow the user's instructions first, then the host project's look and rules, th
 - Group the flags by subsystem (parallelism, MoE, KV cache, Mamba, speculative decoding, vision), with a faint colored edge and the group name small and faint on the right of its first line. Flags that match no group come first, with no name. A long line pushes the name down; it never runs into it.
 - Where many commands share most flags, show the shared lines first and each command's own lines after them, each part named on its right. Changing the command changes only its own part.
 - Put one flag on each line, with a line continuation. Use flag forms that need no JSON quotes.
-- Pin the version: an image tag or digest, or a commit.
+- Pin the version: an image tag or digest, or a commit. Put the image's pull command on a row above the command, in the same dark box, with its own copy button.
+- Show the command for the version it pins: drop each flag that is a default or does nothing there, rename each renamed flag, and drop what only the measurement needed. Do it in one function, and keep the stored data as measured.
+- Name the shared part and the own part on a tab that sits on the line between them: centered, with a border only where its colors differ from the box under it. When the selection changes, the own part glows faintly once.
 - Put environment variables before the command, one on each line.
 - Make each form of a command (shell, container, scheduler, config file) from the same list of flags.
 
@@ -149,6 +162,19 @@ Follow the user's instructions first, then the host project's look and rules, th
 - Make each control target at least 32 px high.
 - Give each hover effect to keyboard focus too.
 - A disabled option says why, in its label or its title.
+
+## Export
+
+- An export makes Markdown for another document: a native dialog, opened by the primary button.
+- Its scope follows the breadcrumbs: a segmented control of their levels, where a level takes in everything under it, and the chosen level and every level after it are highlighted.
+- Checkboxes, under a short label, choose what goes in. The Markdown shows in a box dark like the star, highlighted like it, with a primary copy button.
+- The Markdown holds what the target needs (headings, the version, the commands), not every number on the page.
+
+## Links
+
+- One function owns the link: it reads the address once, gives each state its first value, checks each value for the banner, and writes the address back. Nothing else touches the address.
+- A choice that the page computes, such as the best point at a floor, has a stable name in the link (`point=min-latency`). When a click picks an item that a name means, the link shows the name.
+- An open dialog and its choices are in the link too.
 
 ## PRs and docs
 
