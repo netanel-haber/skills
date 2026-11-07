@@ -11,7 +11,7 @@ The user names the host, and maybe a directory or a session. Decide the rest, an
 Agents change where they keep sessions and which flags they take, so find each fact by looking. The examples at the end are hints from November 2026.
 
 1. **Find the session.** It is this one, unless the user points at another: an id, a file, a phrase from it, or "the last session in <dir>".
-   - Find its files in the agent's config folder (such as `~/.claude` or `~/.codex`): `find <folder> -name '*<id>*'`, or `grep -rl '<phrase>' <folder>`. A phrase that you wrote in this turn finds this session. Take its transcript, everything else named after its id, its project's memory, and its scratchpad, where they exist.
+   - Find its files in the agent's config folder (such as `~/.claude` or `~/.codex`): `find <folder> -name '*<id>*'`, or `grep -rl '<phrase>' <folder>`. A phrase that you wrote in this turn finds this session. Take its transcript, everything else named after its id, its project's memory, and its scratchpad, where they exist. Do not send dependencies or artifacts: the resumed session rebuilds them, and the script leaves them out of folders.
    - Read its working directory, model, effort and permission mode in the latest records of its transcript.
    - If another session may still run, never message it. Wait for its turn to end: `teleport.py wait <transcript> --end <regex> --busy <regex>`. Learn both from its transcript: the record that ends each earlier turn, and the records of replies, tool calls and user messages.
 2. **Probe the host,** in the session's working directory: `teleport.py probe HOST <agent's program> [DIR]`.
@@ -21,8 +21,9 @@ Agents change where they keep sessions and which flags they take, so find each f
 4. **Write the prompt.** Tell the session:
    - that it moved, from which host and directory to which;
    - that the teleport is done and must not run again (if it moved itself: the tool call that ran it shows as interrupted);
-   - what did not move: processes, background tasks and servers (jobs on a shared scheduler keep running: give their IDs);
-   - to continue the work.
+   - what did not move: processes, background tasks and servers (jobs on a shared scheduler keep running: give their IDs).
+
+   The script adds the rest: the code's state, what it did not send, and a last line that says to recover and continue.
 5. **Send,** in the session's working directory: `teleport.py send HOST <its files and folders> --run "<resume command>" --prompt "<prompt>" [--dir DIR]`. Its `note` lines show where each one landed. If one did not land where the host's agent keeps such files, send it again as `LOCAL=REMOTE`.
 6. **Check** its `check` lines: the resume line, tried on the host with a made-up id. An option error (unknown, unexpected or conflicting) means a wrong flag: fix `--run`, and send again. An error about the id or the terminal means that the line is good.
 7. **Reply** with only its last two lines (the window with its attach command, and the resume line), and say which copy is now stale. If you moved this session, make no more tool calls, even if the task is not done. If you moved another one, tell the user to exit it.
