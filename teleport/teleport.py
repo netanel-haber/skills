@@ -11,17 +11,21 @@
     teleport.py send HOST FILE... --run CMD --prompt TEXT    move the session; print the line that resumes it
     teleport.py wait TRANSCRIPT --end REGEX --busy REGEX     wait until a running session's turn ends
 
-Run probe and send in the session's working directory. send:
-- copies each FILE (a file or a folder of the session) to the same place on HOST. A path is mapped by
-  putting HOST's home, temp folder, uid and working directory in place of this machine's, also where
-  the working directory is written into a folder name (with / or each non-alphanumeric as -).
-  LOCAL=REMOTE names the place instead. A file replaces HOST's copy; a folder is merged; where both
-  have a file, the newer one wins. The loser goes to the stash, ~/.cache/teleport/<run> on HOST.
-- brings the code, if the working directory is a git work tree. The working directory on HOST (--dir;
-  by default the same path, under HOST's home) becomes a clone at the same commit if it is missing.
-  If it is clean at that commit, it gets the uncommitted changes and new files; otherwise they wait in
-  the stash. If HOST cannot clone the repository, send sends it along and tries again.
-- writes the prompt to a file, opens a tmux window in the working directory, tries the resume line once
+Run probe and send in the session's working directory. The working directory on HOST is DIR (--dir),
+or else the same path, under HOST's home. send:
+- copies each FILE (a file or a folder of the session) to the same place on HOST: HOST's home, temp
+  folder, uid and working directory take the place of this machine's, also where the working directory
+  is written into a folder name (with / or each non-alphanumeric as -). LOCAL=REMOTE names the place
+  instead. A file replaces HOST's copy, and a folder is merged; where both sides have a file, the newer
+  one wins, and the other goes to the stash, ~/.cache/teleport/<run> on HOST.
+- leaves out what the resumed session rebuilds or fetches: environments, dependencies, caches, and
+  files over 10 MiB other than transcripts. The prompt lists them.
+- brings the code, if the working directory is a git work tree: the working directory on HOST becomes
+  a clone at the same commit if it is missing (from a remote, or from a copy that send sends along),
+  and gets the uncommitted changes and new files if it is clean at that commit. Otherwise, they wait
+  in the stash.
+- writes the prompt to a file, ending it with "You have been teleported using <this skill's link>.
+  Recover: ...", opens a tmux window in the working directory, tries the resume line once
   with a made-up session id (a wrong flag fails, and no session starts), and prints the window and the
   line.
 
@@ -49,9 +53,13 @@ import time
 from pathlib import Path
 
 MARK = "@@TELEPORT@@"  # starts the line of JSON that the host sends back
+SKILL = "https://raw.githubusercontent.com/netanel-haber/skills/main/teleport/SKILL.md"
 FAKE_ID = "00000000-0000-0000-0000-000000000000"
 ID = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{12,}\b")  # a session id in --run
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
+REBUILT = {"node_modules", "__pycache__", ".venv", "venv", "site-packages", ".cache", ".ruff_cache", ".mypy_cache",
+           ".pytest_cache", ".tox", ".gradle", ".next", "target"}  # fmt: skip
+BIG = 10 * 2**20
 BIN_DIRS = ["~/.local/bin", "~/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.volta/bin", "~/.cargo/bin",
             "~/.nvm/versions/node/*/bin", "~/.local/share/fnm/node-versions/*/installation/bin",
             "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]  # fmt: skip
@@ -79,10 +87,10 @@ def git_state(d):
     }
 
 
-def same_path_on_host(cwd, local_home, host_home):
-    """The working directory on HOST: the same path, under HOST's home if it is under the home here."""
+def host_dir(given, cwd, local_home, host_home):
+    """The working directory on HOST: GIVEN, or else the same path, under HOST's home."""
     rel = os.path.relpath(cwd, local_home)
-    return cwd if rel.startswith("..") else os.path.join(host_home, rel)
+    return os.path.expanduser(given or (cwd if rel.startswith("..") else os.path.join(host_home, rel)))
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -103,16 +111,8 @@ def in_window(cmd, timeout=30):
     out = tmp / "out"
     if not tmux or sh([tmux, "new-session", "-d", "-s", sess]).returncode:
         return None
-    sh(
-        [
-            tmux,
-            "send-keys",
-            "-t",
-            f"={sess}:",
-            "-l",
-            f"{{ {cmd} ; }} </dev/null >{out}.part 2>&1; mv {out}.part {out}; exit",
-        ]
-    )
+    keys = f"{{ {cmd} ; }} </dev/null >{out}.part 2>&1; mv {out}.part {out}; exit"
+    sh([tmux, "send-keys", "-t", f"={sess}:", "-l", keys])
     sh([tmux, "send-keys", "-t", f"={sess}:", "Enter"])
     end = time.time() + timeout
     while time.time() < end and not out.exists():
@@ -179,15 +179,14 @@ def find_clones(urls, depth=4, budget=15):
             if any(norm_url(u) in want for u in re.findall(r"^\s*url\s*=\s*(\S+)", config, re.M)):
                 found.append(os.path.realpath(d))
         elif k < depth:
-            stack += [
-                (Path(e.path), k + 1) for e in entries if not e.name.startswith(".") and e.is_dir(follow_symlinks=False)
-            ]
+            subdirs = [e for e in entries if not e.name.startswith(".") and e.is_dir(follow_symlinks=False)]
+            stack += [(Path(e.path), k + 1) for e in subdirs]
     return found
 
 
 def probe(req):
     home = str(Path.home())
-    d = os.path.expanduser(req["dir"] or same_path_on_host(req["cwd"], req["home"], home))
+    d = host_dir(req["dir"], req["cwd"], req["home"], home)
     u = os.uname()
     out = {"system": f"{u.sysname} {u.release} {u.machine}", "home": home, "uid": os.getuid(),
            "tmp": tempfile.gettempdir(), "python": sys.version.split()[0], "tmux": find_tmux(),
@@ -222,28 +221,30 @@ def mapper(local, host):
     return lambda p: pattern.sub(lambda m: subs.get(m.group(0), str(host["uid"])), p)
 
 
-def same_file(a, b):
-    return a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()
+def same_bytes(path, data):
+    return path.is_file() and path.read_bytes() == data
 
 
 def place(src, dst, keep, notes):
-    """Put SRC at DST. A folder is merged file by file. Where DST has another file, the newer one wins,
+    """Put SRC at DST; a folder is merged, file by file. Where DST holds another file, the newer one wins,
     and the other moves to KEEP."""
+    if not src.exists():  # a folder with nothing to send
+        dst.mkdir(parents=True, exist_ok=True)
+        return
     if src.is_dir():
+        dst.mkdir(parents=True, exist_ok=True)
         for f in sorted(p for p in src.rglob("*") if p.is_file()):
             place(f, dst / f.relative_to(src), keep / f.relative_to(src), notes)
         return
-    if same_file(src, dst):  # already there: the stash keeps only what was replaced
-        src.unlink()
+    if dst.is_file() and same_bytes(dst, src.read_bytes()):
+        src.unlink()  # already there; the stash keeps only what was replaced
         return
     if dst.is_file():
-        loser = src if dst.stat().st_mtime > src.stat().st_mtime else dst
+        older = src if dst.stat().st_mtime > src.stat().st_mtime else dst
         keep.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(loser), str(keep))
-        notes.append(
-            f"{dst}: kept the {'copy on this host' if loser == src else 'copy sent'}, the newer; the other is {keep}"
-        )
-        if loser == src:
+        shutil.move(str(older), str(keep))
+        notes.append(f"{dst}: kept the newer copy; the older one is {keep}")
+        if older == src:
             return
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
@@ -274,12 +275,12 @@ def clone(code, d, info):
     target = ["-B", info["branch"], info["head"]] if info["branch"] else ["--detach", info["head"]]
     if sh(g + ["checkout", "-q", *target], timeout=3600, env=env).returncode:
         return None
-    return f"created {d} as a clone of {'the repository sent along' if src.endswith('.bundle') else src} at {info['head'][:12]}"
+    origin = "the repository sent along" if src.endswith(".bundle") else src
+    return f"created {d} as a clone of {origin} at {info['head'][:12]}"
 
 
-def bring_code(code, d, notes):
+def bring_code(code, d, info, notes):
     """Bring the old work tree's code to D, only where that is safe. None: send the repository along."""
-    info = json.loads((code / "info.json").read_text())
     patch, new = code / "uncommitted.patch", code / "untracked.tar"
     if not os.path.isdir(d):
         made = clone(code, d, info)
@@ -310,10 +311,6 @@ def bring_code(code, d, notes):
     return f"applied to {top}: the uncommitted changes and the new files"
 
 
-def same_bytes(path, data):
-    return path.is_file() and path.read_bytes() == data
-
-
 def open_window(sess, name, d):
     """A detached tmux window in D. A window of an earlier send that sits at a shell prompt is replaced."""
     tmux = find_tmux()
@@ -339,44 +336,132 @@ def land(stash):
     meta = json.loads((stash / "meta.json").read_text())
     local = meta["local"]
     host = {"home": str(Path.home()), "tmp": tempfile.gettempdir(), "uid": os.getuid()}
-    d = host["cwd"] = os.path.realpath(
-        os.path.expanduser(meta["dir"] or same_path_on_host(local["cwd"], local["home"], host["home"]))
-    )
+    d = host["cwd"] = os.path.realpath(host_dir(meta["dir"], local["cwd"], local["home"], host["home"]))
     to_host, notes = mapper(local, host), []
     for i, f in enumerate(meta["files"]):
         dst = Path(os.path.expanduser(f["to"] or to_host(f["from"])))
         place(stash / "files" / str(i), dst, stash / "replaced" / str(i), notes)
         notes.append(f"{f['from']} -> {dst}")
-    code = None
-    if (stash / "code" / "info.json").exists():
-        code = bring_code(stash / "code", d, notes)
-        if code is None:
-            print(MARK + json.dumps({"need_repo": True}), flush=True)
-            return
+    info_file = stash / "code" / "info.json"
+    info = json.loads(info_file.read_text()) if info_file.exists() else None
+    code = bring_code(stash / "code", d, info, notes) if info else None
+    if info and code is None:
+        print(MARK + json.dumps({"need_repo": True}), flush=True)
+        return
     os.makedirs(d, exist_ok=True)
+    left = meta["left_out"] + (info["left_out"] if info else [])
     prompt = stash / "prompt.txt"
-    prompt.write_text(meta["prompt"] + (f"\n\nCode: {code}" if code else "") + "\n")
+    prompt.write_text(
+        meta["prompt"]
+        + (f"\n\nCode: {code}" if code else "")
+        + (f"\n\nNot sent (rebuild or fetch them here, if the work needs them): {', '.join(left[:40])}" if left else "")
+        + f"\n\nYou have been teleported using {SKILL}. Recover: rebuild what was not sent, then continue the work.\n"
+    )
+    if left:
+        notes.append(f"not sent: {len(left)} environments, dependencies, caches or big files")
     program = next(w for w in shlex.split(meta["run"]) if "=" not in w)
     found = (in_window(f"command -v {shlex.quote(program)}") or "").strip()
     path = "" if found else next((p["path"] for p in find_program(program)), "")
-    line = (
-        f'PATH={shlex.quote(os.path.dirname(path))}:"$PATH" ' if path else ""
-    ) + f'{meta["run"]} "$(cat {shlex.quote(str(prompt))})"'
+    prefix = f'PATH={shlex.quote(os.path.dirname(path))}:"$PATH" ' if path else ""
+    line = f'{prefix}{meta["run"]} "$(cat {shlex.quote(str(prompt))})"'
     (stash / "resume.sh").write_text(f"cd {shlex.quote(d)} && {line}\n")
     sid = ID.search(meta["run"])
     window = open_window(os.path.basename(program), f"tp-{sid.group(0)[:8] if sid else secrets.token_hex(3)}", d)
     check = None
     if sid:  # the line with a made-up id: a wrong flag fails here, and no session starts
-        out = in_window(
-            f"cd {shlex.quote(d)} && " + line.replace(sid.group(0), FAKE_ID).replace(str(prompt), "/dev/null")
-        )
-        check = [x for x in (out or "(no exit after 30 s)").splitlines() if x.strip()][:6]
+        trial = line.replace(sid.group(0), FAKE_ID).replace(str(prompt), "/dev/null")
+        check = [
+            x
+            for x in (in_window(f"cd {shlex.quote(d)} && {trial}") or "(no exit after 30 s)").splitlines()
+            if x.strip()
+        ][:6]
     print(MARK + json.dumps({"window": window, "line": line, "code": code, "notes": notes, "check": check}), flush=True)
 
 
 # ---------------------------------------------------------------------------------------------------
-# Here: progress, the code snapshot, and the stream to HOST.
+# Here: what to send, the code snapshot, the stream to HOST, and progress.
 # ---------------------------------------------------------------------------------------------------
+
+
+def rebuilt(path):
+    """True for what the resumed session rebuilds or fetches itself: environments, dependencies, caches
+    and big files other than transcripts."""
+    if path.is_dir() and not path.is_symlink():
+        return path.name in REBUILT or (path / "pyvenv.cfg").exists()
+    return path.is_file() and not path.is_symlink() and path.suffix != ".jsonl" and path.stat().st_size > BIG
+
+
+def sendable(root, left_out):
+    """The files under ROOT to send. What is left out goes to LEFT_OUT."""
+    for d, dirs, names in os.walk(root):
+        for x in [x for x in dirs if rebuilt(Path(d) / x)]:
+            dirs.remove(x)
+            left_out.append(os.path.join(d, x) + "/")
+        for n in sorted(names):
+            f = Path(d) / n
+            if rebuilt(f):
+                left_out.append(str(f))
+            else:
+                yield f
+
+
+def snapshot(d, with_repo):
+    """What a clone of the work tree at D lacks: uncommitted changes, new files, commits on no remote."""
+    st = git_state(d)
+    if not st or not st["head"]:
+        return None, []
+    g, files, tmp = ["git", "-C", st["top"]], [], Path(tempfile.mkdtemp())
+    diff = subprocess.run(g + ["diff", "--binary", "HEAD"], capture_output=True, check=True).stdout
+    if diff:
+        files.append(("uncommitted.patch", diff))
+    listed = [n for n in sh(g + ["ls-files", "-z", "--others", "--exclude-standard"]).stdout.split("\0") if n]
+    new = [
+        n
+        for n in listed
+        if not any(rebuilt(Path(st["top"], *Path(n).parts[: i + 1])) for i in range(len(Path(n).parts)))
+    ]
+    st["left_out"] = sorted(set(listed) - set(new))
+    if new:
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as t:
+            for n in new:
+                t.add(os.path.join(st["top"], n), arcname=n, recursive=False)
+        files.append(("untracked.tar", buf.getvalue()))
+    st["unpushed"] = int(sh(g + ["rev-list", "--count", "HEAD", "--not", "--remotes"]).stdout or 0)
+    if st["unpushed"]:
+        sh(g + ["bundle", "create", "-q", str(tmp / "commits.bundle"), "HEAD", "--not", "--remotes"]).check_returncode()
+        files.append(("commits.bundle", tmp / "commits.bundle"))
+    if with_repo:
+        sh(g + ["bundle", "create", "-q", str(tmp / "repo.bundle"), "--all"]).check_returncode()
+        files.append(("repo.bundle", tmp / "repo.bundle"))
+    st["new_files"] = len(new)
+    files.append(("info.json", json.dumps(st).encode()))
+    return st, [(f"code/{name}", data) for name, data in files]
+
+
+def bundle(files, meta, code):
+    """The tar entries of one send, as (name, Path or bytes)."""
+    items, meta["left_out"] = [("teleport.py", Path(__file__).resolve()), *code], []
+    for i, (p, _) in enumerate(files):
+        if p.is_dir():
+            items += [(f"files/{i}/{f.relative_to(p)}", f) for f in sendable(p, meta["left_out"])]
+        else:
+            items.append((f"files/{i}", p))
+    return [*items, ("meta.json", json.dumps(meta).encode())]
+
+
+def write_tar(out, items, advance):
+    with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tar:
+        for name, src in items:
+            if isinstance(src, bytes) or src.suffix == ".jsonl":  # a transcript: cut before a line still being written
+                data = src if isinstance(src, bytes) else src.read_bytes()[: src.read_bytes().rfind(b"\n") + 1]
+                info = tarfile.TarInfo(name)
+                info.size, info.mode = len(data), 0o600
+                info.mtime = time.time() if isinstance(src, bytes) else src.stat().st_mtime
+                tar.addfile(info, io.BytesIO(data))
+            else:
+                tar.add(str(src), arcname=name, recursive=False)
+            advance(len(src) if isinstance(src, bytes) else src.lstat().st_size)
 
 
 class Progress:
@@ -436,51 +521,35 @@ def die(msg):
     sys.exit(f"teleport: {msg}")
 
 
-def snapshot(d, with_repo):
-    """What a clone of the work tree at D lacks: uncommitted changes, new files, commits on no remote."""
-    st = git_state(d)
-    if not st or not st["head"]:
-        return None, []
-    g, files, tmp = ["git", "-C", st["top"]], [], Path(tempfile.mkdtemp())
-    diff = subprocess.run(g + ["diff", "--binary", "HEAD"], capture_output=True, check=True).stdout
-    if diff:
-        files.append(("uncommitted.patch", diff))
-    names = [n for n in sh(g + ["ls-files", "-z", "--others", "--exclude-standard"]).stdout.split("\0") if n]
-    if names:
-        buf = io.BytesIO()
-        with tarfile.open(fileobj=buf, mode="w") as t:
-            for n in names:
-                t.add(os.path.join(st["top"], n), arcname=n, recursive=False)
-        files.append(("untracked.tar", buf.getvalue()))
-    st["unpushed"] = int(sh(g + ["rev-list", "--count", "HEAD", "--not", "--remotes"]).stdout or 0)
-    if st["unpushed"]:
-        sh(g + ["bundle", "create", "-q", str(tmp / "commits.bundle"), "HEAD", "--not", "--remotes"]).check_returncode()
-        files.append(("commits.bundle", tmp / "commits.bundle"))
-    if with_repo:
-        sh(g + ["bundle", "create", "-q", str(tmp / "repo.bundle"), "--all"]).check_returncode()
-        files.append(("repo.bundle", tmp / "repo.bundle"))
-    st["new_files"] = len(names)
-    files.append(("info.json", json.dumps(st).encode()))
-    return st, [(f"code/{name}", data) for name, data in files]
-
-
-def write_tar(out, entries, advance):
-    with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-        for arc, src in entries:
-            if isinstance(src, bytes) or src.suffix == ".jsonl":  # a transcript: cut before a line still being written
-                data = src if isinstance(src, bytes) else src.read_bytes()
-                data = data if isinstance(src, bytes) else data[: data.rfind(b"\n") + 1]
-                info = tarfile.TarInfo(arc)
-                info.size, info.mode = len(data), 0o600
-                info.mtime = time.time() if isinstance(src, bytes) else src.stat().st_mtime
-                tar.addfile(info, io.BytesIO(data))
-            else:
-                tar.add(str(src), arcname=arc, recursive=False)
-            advance(len(src) if isinstance(src, bytes) else src.lstat().st_size)
-
-
 def from_host(text):
     return next((json.loads(x[len(MARK) :]) for x in text.splitlines() if x.startswith(MARK)), None)
+
+
+def send_once(host, items, bars):
+    total = sum(len(s) if isinstance(s, bytes) else s.lstat().st_size for _, s in items)
+    size = f"{len(items)} files ({total / 2**20:.1f} MiB)"
+    task = bars.start(f"send {size} to {host}", total)
+    stash = f'"$HOME"/.cache/teleport/{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(3)}'
+    remote = f'set -e; umask 077; S={stash}; mkdir -p "$S"; cd "$S"; gzip -dc | tar -xf -; exec python3 -I "$S/teleport.py" _land "$S"'
+    ssh = subprocess.Popen(
+        ssh_cmd(host) + [remote], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    err = []
+    threading.Thread(target=lambda: err.append(ssh.stderr.read()), daemon=True).start()
+    try:
+        with gzip.GzipFile(fileobj=ssh.stdin, mode="wb", compresslevel=1) as z:
+            write_tar(z, items, lambda n: bars.advance(task, n))
+        ssh.stdin.close()
+    except BrokenPipeError:
+        pass
+    bars.done(task, f"sent {size} to {host}")
+    task = bars.start("place them, open the window, try the line")
+    result = from_host(ssh.stdout.read().decode(errors="replace"))
+    ssh.wait()
+    if not result:
+        die(f"on {host}: {b''.join(err).decode(errors='replace')[-2000:]}")
+    bars.done(task, f"opened {result['window']}" if "window" in result else f"{host} cannot clone the repository")
+    return result
 
 
 def cmd_probe(a):
@@ -514,42 +583,6 @@ def cmd_wait(a):
         bars.done(task, f"the turn ended after {time.time() - t0:.0f} s")
 
 
-def entries(files, meta, code):
-    out = [("teleport.py", Path(__file__).resolve()), ("meta.json", json.dumps(meta).encode()), *code]
-    for i, (p, _) in enumerate(files):
-        if p.is_dir():
-            out += [(f"files/{i}/{q.relative_to(p)}", q) for q in sorted(p.rglob("*")) if q.is_file() or q.is_symlink()]
-        else:
-            out.append((f"files/{i}", p))
-    return out
-
-
-def send_once(host, items, bars):
-    total = sum(len(s) if isinstance(s, bytes) else s.lstat().st_size for _, s in items)
-    task = bars.start(f"send {len(items)} files ({total / 2**20:.1f} MiB) to {host}", total)
-    stash = f'"$HOME"/.cache/teleport/{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(3)}'
-    remote = f'set -e; umask 077; S={stash}; mkdir -p "$S"; cd "$S"; gzip -dc | tar -xf -; exec python3 -I "$S/teleport.py" _land "$S"'
-    ssh = subprocess.Popen(
-        ssh_cmd(host) + [remote], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-    err = []
-    threading.Thread(target=lambda: err.append(ssh.stderr.read()), daemon=True).start()
-    try:
-        with gzip.GzipFile(fileobj=ssh.stdin, mode="wb", compresslevel=1) as z:
-            write_tar(z, items, lambda n: bars.advance(task, n))
-        ssh.stdin.close()
-    except BrokenPipeError:
-        pass
-    bars.done(task, f"sent {len(items)} files ({total / 2**20:.1f} MiB) to {host}")
-    task = bars.start("place them, open the window, try the line")
-    result = from_host(ssh.stdout.read().decode(errors="replace"))
-    ssh.wait()
-    if not result:
-        die(f"on {host}: {b''.join(err).decode(errors='replace')[-2000:]}")
-    bars.done(task, f"opened {result['window']}" if "window" in result else f"{host} cannot clone the repository")
-    return result
-
-
 def cmd_send(a):
     files = []
     for x in a.files:
@@ -562,20 +595,19 @@ def cmd_send(a):
     local = {"home": str(Path.home()), "tmp": tempfile.gettempdir(), "uid": os.getuid(), "cwd": cwd}
     meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "local": local,
             "files": [{"from": str(p.resolve()), "to": to} for p, to in files]}  # fmt: skip
-    t0 = time.time()
+    t0, code = time.time(), []
     with Progress() as bars:
-        st, code = None, []
         if git_state(cwd):
             task = bars.start("snapshot the code")
-            st, code = snapshot(cwd, False)
+            st, code = snapshot(cwd, with_repo=False)
             bars.done(
                 task,
                 f"code: {st['top']} at {st['head'][:12]}, {st['new_files']} new files, {st['unpushed']} unpushed commits",
             )
-        result = send_once(a.host, entries(files, meta, code), bars)
-        if result.get("need_repo"):  # HOST cannot clone it: send the repository along
-            st, code = snapshot(cwd, True)
-            result = send_once(a.host, entries(files, meta, code), bars)
+        result = send_once(a.host, bundle(files, meta, code), bars)
+        if result.get("need_repo"):  # HOST cannot clone the repository: send it along
+            st, code = snapshot(cwd, with_repo=True)
+            result = send_once(a.host, bundle(files, meta, code), bars)
             if result.get("need_repo"):
                 die(f"{a.host} could not clone the repository, even from the copy sent along")
     for n in result["notes"]:
@@ -594,7 +626,7 @@ def main():
     p = sub.add_parser("probe", help="facts about HOST: the program, the working directory, clones; changes nothing")
     p.add_argument("host")
     p.add_argument("program", help="the agent's program, such as claude")
-    p.add_argument("dir", nargs="?", help="the working directory on HOST (default: the same path, under its home)")
+    p.add_argument("dir", nargs="?", help="the working directory on HOST (else the same path, under its home)")
     s = sub.add_parser("send", help="move the session; print the line that resumes it")
     s.add_argument("host")
     s.add_argument("files", nargs="+", metavar="FILE", help="a file or folder of the session, or LOCAL=REMOTE")
@@ -602,7 +634,7 @@ def main():
         "--run", required=True, help="the command that resumes the session; the prompt becomes its last argument"
     )
     s.add_argument("--prompt", required=True, help="the first message to the resumed session")
-    s.add_argument("--dir", help="the working directory on HOST (default: the same path, under its home)")
+    s.add_argument("--dir", help="the working directory on HOST (else the same path, under its home)")
     w = sub.add_parser("wait", help="wait until a running session's turn ends; touch nothing")
     w.add_argument("transcript")
     w.add_argument("--end", required=True, metavar="REGEX", help="a line that ends a turn")
