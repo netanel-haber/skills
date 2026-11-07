@@ -10,23 +10,24 @@ Move only what the session needs to resume: its transcript, history, memory and 
 
 `teleport.py` does the mechanics and knows nothing about agents. It is next to this file; if you read this from a URL, it is at the same URL with `teleport.py` in place of `SKILL.md`: download it. Read its docstring first. If a part does not fit, change the script or do that part by hand. Run it as `uv run --no-project --script <path>` (or `python3 <path>`), outside any sandbox, in the session's working directory.
 
-Agents change where they keep sessions and which flags they take, so find each fact by looking. The examples at the end are hints from November 2026.
+Agents change where they keep sessions and which flags they take, so find each fact by looking. The examples at the end are hints from November 2026. Find only the facts that the steps ask for, with few commands.
 
 1. **Find the session.** It is this one, unless the user points at another: an id, a file, a phrase from it, or "the last session in <dir>".
-   - Find its files in the agent's config folder (such as `~/.claude` or `~/.codex`): `find <folder> -name '*<id>*'`, or `grep -rl '<phrase>' <folder>`. A phrase that you wrote in this turn finds this session. Take its transcript, everything else named after its id, its project's memory, and its scratchpad, where they exist.
-   - Read its working directory, model, effort and permission mode in the latest records of its transcript.
-   - If another session may still run, never message it and never wait for it: pass `send` the record that ends a turn, as `--cut <regex>` (learn it from the earlier turns in its transcript). The session then moves as of its last finished turn. Its subagents, background tasks, workflows and schedules do not move; the prompt names them.
+   - Its files: search the agent's config folder (such as `~/.claude` or `~/.codex`) with `find <folder> -name '*<id>*'`, or `grep -rl '<phrase>' <folder>`. A phrase that you wrote in this turn finds this session. Take its transcript, everything else named after its id, its project's memory, and its scratchpad, where they exist.
+   - Its working directory, model, effort and permission mode: the latest records of its transcript.
+   - What it had running (jobs, subagents, background tasks, workflows, schedules): what its transcript shows. Do not investigate further.
+   - If another session may still run, never message it and never wait for it. Pass `send` the record that ends a turn, as `--cut <regex>` (learn it from the earlier turns in its transcript). The session then moves as of its last finished turn.
 2. **Probe the host,** in the session's working directory: `teleport.py probe HOST <agent's program> [DIR]`. DIR is the directory that the user named, or else the same path under the host's home; `send` creates it if it is missing. If the session already runs on the host, or `python3` or `tmux` is missing there, tell the user.
 3. **Write the resume command** from the host's help (in the probe, and in the help of its resume subcommand): resume the id, with the same model, effort and permission mode, where the host has flags for them.
 4. **Write the prompt.** Tell the session:
    - that it moved, from which host and directory to which;
    - that the teleport is done and must not run again (if it moved itself: the tool call that ran it shows as interrupted);
-   - what did not move: processes, subagents, background tasks, workflows, schedules and servers that were running (jobs on a shared scheduler keep running: give their IDs).
+   - what it had running, which did not move (jobs on a shared scheduler keep running: give their IDs).
 
-   The script adds the rest: where the old working directory is, what it did not send, and a last line that says to recover: set up the project and what was not sent, stop or pick up the jobs left running (not duplicate or ignore them), and continue.
-5. **Send,** in the session's working directory: `teleport.py send HOST <its files and folders> --run "<resume command>" --prompt "<prompt>" [--dir DIR]`. Its `note` lines show where each one landed. If one did not land where the host's agent keeps such files, send it again as `LOCAL=REMOTE`.
+   The script adds the rest: where the old working directory is, whether a running turn was cut, what it did not send, and a last line that says to recover: set up the project and what was not sent, stop or pick up the jobs left running (not duplicate or ignore them), and continue.
+5. **Send,** in the session's working directory: `teleport.py send HOST <its files and folders> --run "<resume command>" --prompt "<prompt>" [--dir DIR] [--cut <regex>]`. Its `note` lines show where each one landed. If one did not land where the host's agent keeps such files, send it again as `LOCAL=REMOTE`.
 6. **Check** its `check` lines: the resume line, tried on the host with a made-up id. An option error (unknown, unexpected or conflicting) means a wrong flag: fix `--run`, and send again. An error about the id or the terminal means that the line is good.
-7. **Reply** with only its last two lines (the window with its attach command, and the resume line), and say which copy is now stale. If you moved this session, make no more tool calls, even if the task is not done. If you moved another one, tell the user to exit it.
+7. **Reply** with its last line (the command that attaches to the window, where the resume line is typed in: the user presses Enter), any `note` that the user must act on (such as an older version on the host), and which copy is now stale. If you moved this session, make no more tool calls, even if the task is not done. If you moved another one, tell the user to exit it.
 
 ## Examples (November 2026: Claude Code 2.1, Codex 0.166)
 

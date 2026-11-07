@@ -8,7 +8,7 @@
 """teleport: move a coding-agent session to another machine over SSH, ready to resume in tmux there.
 
     teleport.py probe HOST PROGRAM [DIR]                     facts about HOST; changes nothing
-    teleport.py send HOST FILE... --run CMD --prompt TEXT    move the session; print the line that resumes it
+    teleport.py send HOST FILE... --run CMD --prompt TEXT    move the session; print how to resume it
 
 Run both in the session's working directory, as `uv run --no-project --script teleport.py ...` (uv then
 installs rich for the progress bars, at its versions of the date above, and never touches the project
@@ -21,12 +21,15 @@ HOST's home; send creates it if it is missing, and does nothing else with the pr
   one wins, and the other goes to the stash, ~/.cache/teleport/<run> on HOST.
 - sends each transcript (a .jsonl file) up to its last complete line or, with --cut REGEX, up to its
   last line that matches REGEX: the end of the last finished turn, for a session that still runs.
-- leaves out what the resumed session rebuilds or fetches: environments, installed or unpacked packages,
-  dependencies, caches, files over 10 MiB and folders over 50 MiB, other than transcripts.
-- writes the prompt to a file. It adds where the old working directory is, what was left out, and a
-  last line: "You have been teleported using <this skill's link>. Recover: ...".
+- leaves out what the resumed session rebuilds or fetches: environments, packages, dependencies,
+  caches, build outputs, binary artifacts (wheels, objects, tensors, archives), files over 10 MiB and
+  folders over 50 MiB. Transcripts always go.
+- writes the prompt to a file. It adds where the old working directory is, whether a running turn was
+  cut, what was left out, and a last line: "You have been teleported using <this skill's link>. ...".
 - opens a tmux window in the working directory, tries the resume line once with a made-up session id
-  (a wrong flag fails, and no session starts), and prints the window and the line.
+  (a wrong flag fails, and no session starts), types the resume line into the window without running
+  it, and prints how to attach. It also notes when HOST's program is older than the one here.
+- removes its runs on HOST that are older than 14 days.
 
 It knows nothing about agents: the teleport skill (SKILL.md, next to this file) tells it what to move.
 On HOST, it runs a copy of itself with python3 (3.7 or newer).
@@ -57,8 +60,10 @@ FAKE_ID = "00000000-0000-0000-0000-000000000000"
 ID = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{12,}\b")  # a session id in --run
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
 REBUILT = {"node_modules", "__pycache__", ".venv", "venv", "site-packages", ".cache", ".ruff_cache", ".mypy_cache",
-           ".pytest_cache", ".tox", ".gradle", ".next", "target"}  # fmt: skip
-BIG, BIG_FOLDER = 10 * 2**20, 50 * 2**20
+           ".pytest_cache", ".tox", ".gradle", ".next", "target", "build", "dist"}  # fmt: skip
+ARTIFACTS = {".whl", ".so", ".o", ".a", ".pyc", ".pt", ".pth", ".bin", ".safetensors", ".ckpt", ".npy", ".npz",
+             ".onnx", ".engine", ".tar", ".gz", ".tgz", ".zip", ".xz", ".zst", ".bz2", ".deb", ".rpm"}  # fmt: skip
+BIG, BIG_FOLDER, STASH_DAYS = 10 * 2**20, 50 * 2**20, 14
 BIN_DIRS = ["~/.local/bin", "~/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.volta/bin", "~/.cargo/bin",
             "~/.nvm/versions/node/*/bin", "~/.local/share/fnm/node-versions/*/installation/bin",
             "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]  # fmt: skip
@@ -70,6 +75,15 @@ def sh(cmd, timeout=None, **kw):
         return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, **kw)
     except (OSError, subprocess.SubprocessError) as e:
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
+
+
+def version_of(path, flag="--version"):
+    """PATH's version line, and its numbers, such as (2, 1, 319)."""
+    env = dict(os.environ, PATH=os.path.dirname(path) + os.pathsep + os.environ.get("PATH", ""))
+    r = sh([path, flag], timeout=30, env=env)
+    line = next((x.strip() for x in (r.stdout + r.stderr).splitlines() if re.search(r"\d+\.\d+", x)), None)
+    m = re.search(r"\d+(?:\.\d+)+", line or "")
+    return line, tuple(int(x) for x in m.group(0).split(".")) if m else ()
 
 
 def host_dir(given, cwd, local_home, host_home):
@@ -120,11 +134,10 @@ def find_program(name):
     window = (in_window(lookup) or "").strip()
     found = []
     for p in dict.fromkeys(x for x in paths if x.startswith("/") and os.access(x, os.X_OK)):
-        env = dict(os.environ, PATH=os.path.dirname(p) + os.pathsep + os.environ.get("PATH", ""))
-        v = sh([p, "-V" if name == "tmux" else "--version"], timeout=30, env=env)
-        version = next((x.strip() for x in (v.stdout + v.stderr).splitlines() if re.search(r"\d+\.\d+", x)), None)
         in_win = bool(window) and os.path.realpath(window) == os.path.realpath(p)
-        found.append({"path": p, "version": version, "in_window": in_win})
+        found.append(
+            {"path": p, "version": version_of(p, "-V" if name == "tmux" else "--version")[0], "in_window": in_win}
+        )
     return found
 
 
@@ -159,7 +172,7 @@ def probe(req):
 
 
 # ---------------------------------------------------------------------------------------------------
-# On HOST: land. Place the files, write the prompt, open the window, try the line.
+# On HOST: land. Place the files, write the prompt, open the window, try the line, type it in.
 # ---------------------------------------------------------------------------------------------------
 
 
@@ -220,10 +233,38 @@ def open_window(sess, name, d):
     return f"{sess}:{name}"
 
 
+def remove_made_up(budget=10):
+    """Remove what a program made for the made-up id: names that contain it, a few levels deep in the
+    temp folder and in the home folder's hidden folders (not its big caches)."""
+    skip, end = {".cache", ".local", ".npm", ".nvm", ".cargo", ".rustup", ".conda", ".git"}, time.time() + budget
+    roots = [Path(tempfile.gettempdir())] + [p for p in Path.home().glob(".*") if p.is_dir() and p.name not in skip]
+    for root in roots:
+        for d, dirs, names in os.walk(root):
+            for n in [*dirs, *names]:
+                if FAKE_ID in n:
+                    f = os.path.join(d, n)
+                    shutil.rmtree(f, ignore_errors=True) if os.path.isdir(f) else os.remove(f)
+            dirs[:] = [x for x in dirs if FAKE_ID not in x] if len(Path(d).relative_to(root).parts) < 3 else []
+            if time.time() > end:
+                return
+
+
+def try_line(line, sid, prompt, d):
+    """The resume line, run once in a throwaway window with a made-up id: a wrong flag fails, and no
+    session starts."""
+    trial = line.replace(sid, FAKE_ID).replace(str(prompt), "/dev/null")
+    out = in_window(f"cd {shlex.quote(d)} && {trial}") or "(no exit after 30 s)"
+    remove_made_up()
+    return [x for x in out.splitlines() if x.strip()][:6]
+
+
 def land(stash):
     stash = Path(stash)
     meta = json.loads((stash / "meta.json").read_text())
     local = meta["local"]
+    for old in stash.parent.iterdir():  # runs older than STASH_DAYS
+        if old != stash and time.time() - old.stat().st_mtime > STASH_DAYS * 86400:
+            shutil.rmtree(old, ignore_errors=True)
     host = {"home": str(Path.home()), "tmp": tempfile.gettempdir(), "uid": os.getuid()}
     d = host["cwd"] = os.path.realpath(host_dir(meta["dir"], local["cwd"], local["home"], host["home"]))
     os.makedirs(d, exist_ok=True)
@@ -232,35 +273,39 @@ def land(stash):
         dst = Path(os.path.expanduser(f["to"] or to_host(f["from"])))
         place(stash / "files" / str(i), dst, stash / "replaced" / str(i), notes)
         notes.append(f"{f['from']} -> {dst}")
-    left = meta["left_out"]
-    if left:
-        notes.append(f"not sent: {len(left)} environments, dependencies, caches or big files")
+    if meta["left_out"]:
+        notes.append(f"not sent: {len(meta['left_out'])} environments, packages, caches, builds or artifacts")
     prompt = stash / "prompt.txt"
     prompt.write_text(
         meta["prompt"]
-        + f"\n\nThe old working directory, {local['host']}:{local['cwd']}, keeps its files, uncommitted changes and builds;"
-        + " take from there what the work needs."
-        + (f"\n\nNot sent: {', '.join(left[:40])}" if left else "")
+        + f"\n\nThe old working directory, {local['host']}:{local['cwd']}, keeps its files, uncommitted changes and"
+        + " builds; take from there what the work needs."
+        + (
+            "\n\nThe turn that was still running in the old session when you moved is not in this copy;"
+            + " what it did, it did in the old working directory."
+            if meta["cut"]
+            else ""
+        )
+        + (f"\n\nNot sent: {', '.join(meta['left_out'][:40])}" if meta["left_out"] else "")
         + f"\n\nYou have been teleported using {SKILL}. Recover: set up here what the work needs (the project,"
         + " its dependencies, what was not sent). Stop or pick up the jobs that the old session left running,"
         + " but do not duplicate or ignore them. Then continue the work.\n"
     )
     program = next(w for w in shlex.split(meta["run"]) if "=" not in w)
     found = (in_window(f"command -v {shlex.quote(program)}") or "").strip()
-    path = "" if found else next((p["path"] for p in find_program(program)), "")
-    prefix = f'PATH={shlex.quote(os.path.dirname(path))}:"$PATH" ' if path else ""
+    path = found if found.startswith("/") else next((p["path"] for p in find_program(program)), "")
+    host_version = version_of(path) if path else (None, ())
+    if host_version[1] and meta["version"][1] and host_version[1] < tuple(meta["version"][1]):
+        notes.append(
+            f"{program} on this host is older ({host_version[0]}) than on {local['host']} ({meta['version'][0]})"
+        )
+    prefix = f'PATH={shlex.quote(os.path.dirname(path))}:"$PATH" ' if path and not found else ""
     line = f'{prefix}{meta["run"]} "$(cat {shlex.quote(str(prompt))})"'
     (stash / "resume.sh").write_text(f"cd {shlex.quote(d)} && {line}\n")
     sid = ID.search(meta["run"])
     window = open_window(os.path.basename(program), f"tp-{sid.group(0)[:8] if sid else secrets.token_hex(3)}", d)
-    check = None
-    if sid:  # the line with a made-up id: a wrong flag fails here, and no session starts
-        trial = line.replace(sid.group(0), FAKE_ID).replace(str(prompt), "/dev/null")
-        check = [
-            x
-            for x in (in_window(f"cd {shlex.quote(d)} && {trial}") or "(no exit after 30 s)").splitlines()
-            if x.strip()
-        ][:6]
+    check = try_line(line, sid.group(0), prompt, d) if sid else None
+    sh([find_tmux(), "send-keys", "-t", f"={window}", "-l", line])  # typed in, not run: Enter starts it
     print(MARK + json.dumps({"window": window, "line": line, "notes": notes, "check": check}), flush=True)
 
 
@@ -284,7 +329,7 @@ def folder_size(path, limit):
 
 def rebuilt(path):
     """True for what the resumed session rebuilds or fetches itself: environments, installed or unpacked
-    packages, dependencies, caches, big files other than transcripts, and big folders of such files."""
+    packages, dependencies, caches, build outputs, binary artifacts, big files and big folders."""
     if path.is_dir() and not path.is_symlink():
         package = any(c.suffix in (".dist-info", ".egg-info") for c in path.iterdir())
         return (
@@ -293,7 +338,9 @@ def rebuilt(path):
             or package
             or folder_size(path, BIG_FOLDER) > BIG_FOLDER
         )
-    return path.is_file() and not path.is_symlink() and path.suffix != ".jsonl" and path.stat().st_size > BIG
+    if not path.is_file() or path.is_symlink() or path.suffix == ".jsonl":
+        return False
+    return path.suffix in ARTIFACTS or path.stat().st_size > BIG
 
 
 def sendable(root, left_out):
@@ -310,37 +357,45 @@ def sendable(root, left_out):
                 yield f
 
 
-def bundle(files, meta):
-    """The tar entries of the send, as (name, Path or bytes)."""
-    items, meta["left_out"] = [("teleport.py", Path(__file__).resolve())], []
-    for i, (p, _) in enumerate(files):
-        if p.is_dir():
-            items += [(f"files/{i}/{f.relative_to(p)}", f) for f in sendable(p, meta["left_out"])]
-        else:
-            items.append((f"files/{i}", p))
-    return [*items, ("meta.json", json.dumps(meta).encode())]
-
-
 def transcript(path, cut):
-    """A transcript up to its last complete line, or, with CUT, up to its last line that matches CUT."""
+    """A transcript up to its last complete line, or, with CUT, up to its last line that matches CUT.
+    Also whether CUT dropped lines: a turn that was still running."""
     data = path.read_bytes()
     lines = data[: data.rfind(b"\n") + 1].splitlines(keepends=True)
     ends = [i for i, x in enumerate(lines) if cut and cut.search(x.decode(errors="replace"))]
-    return b"".join(lines[: ends[-1] + 1] if ends else lines)
+    kept = lines[: ends[-1] + 1] if ends else lines
+    return b"".join(kept), len(kept) < len(lines)
 
 
-def write_tar(out, items, cut, advance):
-    with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tar:
-        for name, src in items:
-            if isinstance(src, bytes) or src.suffix == ".jsonl":
-                data = src if isinstance(src, bytes) else transcript(src, cut)
-                info = tarfile.TarInfo(name)
-                info.size, info.mode = len(data), 0o600
-                info.mtime = time.time() if isinstance(src, bytes) else src.stat().st_mtime
-                tar.addfile(info, io.BytesIO(data))
+def bundle(files, meta, cut):
+    """The entries of the send, as (name, path, data): DATA, when set, is sent in place of PATH's bytes."""
+    items, meta["left_out"], meta["cut"] = [("teleport.py", Path(__file__).resolve(), None)], [], False
+    for i, (p, _) in enumerate(files):
+        paths = (
+            [(f"files/{i}/{f.relative_to(p)}", f) for f in sendable(p, meta["left_out"])]
+            if p.is_dir()
+            else [(f"files/{i}", p)]
+        )
+        for name, f in paths:
+            if f.suffix == ".jsonl" and not f.is_symlink():
+                data, dropped = transcript(f, cut)
+                meta["cut"] |= dropped
+                items.append((name, f, data))
             else:
-                tar.add(str(src), arcname=name, recursive=False)
-            advance(len(src) if isinstance(src, bytes) else src.lstat().st_size)
+                items.append((name, f, None))
+    return [*items, ("meta.json", None, json.dumps(meta).encode())]
+
+
+def write_tar(out, items, advance):
+    with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tar:
+        for name, path, data in items:
+            if data is None:
+                tar.add(str(path), arcname=name, recursive=False)
+            else:
+                info = tarfile.TarInfo(name)
+                info.size, info.mode, info.mtime = len(data), 0o600, path.stat().st_mtime if path else time.time()
+                tar.addfile(info, io.BytesIO(data))
+            advance(len(data) if data is not None else path.lstat().st_size)
 
 
 class Progress:
@@ -425,12 +480,14 @@ def cmd_send(a):
         if not path.exists():
             die(f"{local} does not exist here")
         files.append((path, to or None))
+    program = next(w for w in shlex.split(a.run) if "=" not in w)
+    here = shutil.which(program)
     local = {"host": socket.gethostname(), "home": str(Path.home()), "tmp": tempfile.gettempdir(),
              "uid": os.getuid(), "cwd": os.path.realpath(os.getcwd())}  # fmt: skip
-    meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "local": local,
+    meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "local": local, "version": version_of(here) if here else (None, ()),
             "files": [{"from": str(p.resolve()), "to": to} for p, to in files]}  # fmt: skip
-    items, cut, t0 = bundle(files, meta), re.compile(a.cut) if a.cut else None, time.time()
-    total = sum(len(s) if isinstance(s, bytes) else s.lstat().st_size for _, s in items)
+    items, t0 = bundle(files, meta, re.compile(a.cut) if a.cut else None), time.time()
+    total = sum(len(d) if d is not None else p.lstat().st_size for _, p, d in items)
     size = f"{len(items)} files ({total / 2**20:.1f} MiB)"
     stash = f'"$HOME"/.cache/teleport/{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(3)}'
     remote = f'set -e; umask 077; S={stash}; mkdir -p "$S"; cd "$S"; gzip -dc | tar -xf -; exec python3 -I "$S/teleport.py" _land "$S"'
@@ -443,7 +500,7 @@ def cmd_send(a):
         threading.Thread(target=lambda: err.append(ssh.stderr.read()), daemon=True).start()
         try:
             with gzip.GzipFile(fileobj=ssh.stdin, mode="wb", compresslevel=1) as z:
-                write_tar(z, items, cut, lambda n: bars.advance(task, n))
+                write_tar(z, items, lambda n: bars.advance(task, n))
             ssh.stdin.close()
         except BrokenPipeError:
             pass
@@ -459,8 +516,8 @@ def cmd_send(a):
     for c in result["check"] or []:
         print(f"check   {c}")
     print(f"time    {time.time() - t0:.1f} s")
-    print(f"window  {result['window']}  (ssh -t {a.host} tmux attach -t {result['window']})")
-    print(result["line"])
+    print(f"line    {result['line']}")
+    print(f"resume  ssh -t {a.host} tmux attach -t {result['window']}   (then press Enter: the line is typed in)")
 
 
 def main():
@@ -470,7 +527,7 @@ def main():
     p.add_argument("host")
     p.add_argument("program", help="the agent's program, such as claude")
     p.add_argument("dir", nargs="?", help="the working directory on HOST (else the same path, under its home)")
-    s = sub.add_parser("send", help="move the session; print the line that resumes it")
+    s = sub.add_parser("send", help="move the session; print how to resume it")
     s.add_argument("host")
     s.add_argument("files", nargs="+", metavar="FILE", help="a file or folder of the session, or LOCAL=REMOTE")
     s.add_argument(
