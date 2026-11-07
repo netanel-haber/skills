@@ -22,8 +22,8 @@ HOST's home; send creates it if it is missing, and does nothing else with the pr
 - sends each transcript (a .jsonl file) up to its last complete line or, with --cut REGEX, up to its
   last line that matches REGEX: the end of the last finished turn, for a session that still runs.
 - leaves out what the resumed session rebuilds or fetches: environments, packages, dependencies,
-  caches, build outputs, binary artifacts (wheels, objects, tensors, archives), files over 10 MiB and
-  folders over 50 MiB. Transcripts always go.
+  caches, build outputs, binary artifacts (wheels, objects, tensors, archives) and files over 10 MiB;
+  then any folder whose remaining files still pass 50 MiB. Transcripts always go.
 - writes the prompt to a file. It adds where the old working directory is, whether a running turn was
   cut, what was left out, and a last line: "You have been teleported using <this skill's link>. ...".
 - opens a tmux window in the working directory, tries the resume line once with a made-up session id
@@ -308,47 +308,49 @@ def land(stash):
 # ---------------------------------------------------------------------------------------------------
 
 
-def folder_size(path, limit):
-    """The bytes of the files under PATH other than transcripts, counted up to LIMIT."""
-    total = 0
-    for d, _, names in os.walk(path):
-        for n in names:
-            f = os.path.join(d, n)
-            if not n.endswith(".jsonl") and not os.path.islink(f):
-                total += os.path.getsize(f)
-                if total > limit:
-                    return total
-    return total
-
-
-def rebuilt(path):
-    """True for what the resumed session rebuilds or fetches itself: environments, installed or unpacked
-    packages, dependencies, caches, build outputs, binary artifacts, big files and big folders."""
-    if path.is_dir() and not path.is_symlink():
+def marked(path):
+    """A folder that the resumed session rebuilds or fetches as a whole: an environment, an installed or
+    unpacked package, dependencies, a cache, build output."""
+    try:
         package = any(c.suffix in (".dist-info", ".egg-info") for c in path.iterdir())
-        return (
-            path.name in REBUILT
-            or (path / "pyvenv.cfg").exists()
-            or package
-            or folder_size(path, BIG_FOLDER) > BIG_FOLDER
-        )
-    if not path.is_file() or path.is_symlink() or path.suffix == ".jsonl":
-        return False
-    return path.suffix in ARTIFACTS or path.stat().st_size > BIG
+    except OSError:
+        package = False
+    return path.name in REBUILT or (path / "pyvenv.cfg").exists() or package
+
+
+def artifact(path):
+    """A file that the resumed session rebuilds or fetches: a binary artifact, or a big file. Never a
+    transcript."""
+    return path.suffix != ".jsonl" and (path.suffix in ARTIFACTS or path.stat().st_size > BIG)
 
 
 def sendable(root, left_out):
-    """The files under ROOT to send. What is left out goes to LEFT_OUT."""
-    for d, dirs, names in os.walk(root):
-        for x in [x for x in dirs if rebuilt(Path(d) / x)]:
-            dirs.remove(x)
-            left_out.append(os.path.join(d, x) + "/")
-        for n in sorted(names):
-            f = Path(d) / n
-            if rebuilt(f):
-                left_out.append(str(f))
+    """The files under ROOT to send, judged bottom-up: environments, packages, caches, builds and
+    artifacts are left out first; then a folder still over 50 MiB (transcripts aside) is left out as a
+    whole. What is left out goes to LEFT_OUT."""
+
+    def visit(d):
+        files, size, lost = [], 0, []
+        for e in sorted(d.iterdir()):
+            if e.is_dir() and not e.is_symlink():
+                if marked(e):
+                    lost.append(f"{e}/")
+                    continue
+                sub_files, sub_size, sub_lost = visit(e)
+                if sub_size > BIG_FOLDER:
+                    lost.append(f"{e}/")
+                else:
+                    files, size, lost = files + sub_files, size + sub_size, lost + sub_lost
+            elif e.is_file() and not e.is_symlink() and artifact(e):
+                lost.append(str(e))
             else:
-                yield f
+                files.append(e)
+                size += 0 if e.suffix == ".jsonl" else e.lstat().st_size
+        return files, size, lost
+
+    files, _, lost = visit(root)
+    left_out += lost
+    return files
 
 
 def transcript(path, cut):
