@@ -362,6 +362,7 @@ def land(stash):
     line = (
         f'PATH={shlex.quote(os.path.dirname(path))}:"$PATH" ' if path else ""
     ) + f'{meta["run"]} "$(cat {shlex.quote(str(prompt))})"'
+    (stash / "resume.sh").write_text(f"cd {shlex.quote(d)} && {line}\n")
     sid = ID.search(meta["run"])
     window = open_window(os.path.basename(program), f"tp-{sid.group(0)[:8] if sid else secrets.token_hex(3)}", d)
     check = None
