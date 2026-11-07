@@ -25,7 +25,8 @@ or else the same path, under HOST's home. send:
   and gets the uncommitted changes and new files if it is clean at that commit. Otherwise, they wait
   in the stash.
 - writes the prompt to a file, ending it with "You have been teleported using <this skill's link>.
-  Recover: ...", opens a tmux window in the working directory, tries the resume line once
+  Recover: ..." (rebuild what was not sent; stop or pick up the jobs left running, not duplicate or
+  ignore them; continue), opens a tmux window in the working directory, tries the resume line once
   with a made-up session id (a wrong flag fails, and no session starts), and prints the window and the
   line.
 
@@ -355,7 +356,7 @@ def land(stash):
         meta["prompt"]
         + (f"\n\nCode: {code}" if code else "")
         + (f"\n\nNot sent (rebuild or fetch them here, if the work needs them): {', '.join(left[:40])}" if left else "")
-        + f"\n\nYou have been teleported using {SKILL}. Recover: rebuild what was not sent, then continue the work.\n"
+        + f"\n\nYou have been teleported using {SKILL}. Recover: rebuild what was not sent. Stop or pick up the jobs that the old session left running, but do not duplicate or ignore them. Then continue the work.\n"
     )
     if left:
         notes.append(f"not sent: {len(left)} environments, dependencies, caches or big files")
