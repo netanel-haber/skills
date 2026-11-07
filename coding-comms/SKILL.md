@@ -5,7 +5,7 @@ description: "Write and review text about code: PR and commit messages, reviews,
 
 Follow the user's instructions first, then the project's rules and recent style (such as title prefixes), then this skill. Do every step.
 
-1. **Read the whole change**, then **list the facts** the reader needs and cannot see in it: what it does, why (only if not obvious to the field), costs, limits, what was and was not tested, and measured numbers with their setup. Put each change on its own line. Mark it **major** if a user would notice it or search for it: a new API, platform, format or type, changed behavior or results, a removed feature, or a measured speedup.
+1. **Read the whole change**, then **list the facts** the reader needs and cannot see in it: what it does, why, costs, limits, what was and was not tested, and measured numbers with their setup. Put each change on its own line. Mark it **major** if a user would notice it or search for it: a new API, platform, format or type, changed behavior or results, a removed feature, or a measured speedup.
 2. **Draft** from the template below. Write very simply: common words, exact technical terms, short sentences with one idea each, active voice.
 3. **Cut** each sentence that:
    - repeats the code, the diff or the docstrings: types, layouts, encodings, formulas, the contract;
