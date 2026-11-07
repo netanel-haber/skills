@@ -4,4 +4,4 @@
 | [sem-compress](sem-compress) | Makes code smaller. It removes repetition, dead code and needless layers, and it keeps every feature. |
 | [coding-comms](coding-comms) | Writes and reviews text about code: PR and commit messages, reviews, issues, comments, docstrings and design docs. |
 | [visual-comms](visual-comms) | Designs, builds and reviews visual output about code: pages, dashboards, tables, charts, diagrams and images in PRs. |
-| [visual-loop](visual-loop) | Iterates on visual work with the user on one page that reloads by itself, and looks at each round in a screenshot first. |
+| [visual-loop](visual-loop) | Iterates with the user on anything judged by looking at it, in one view that reloads by itself, and looks at each round in a screenshot first. |
