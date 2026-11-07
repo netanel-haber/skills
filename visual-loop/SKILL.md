@@ -19,6 +19,10 @@ Follow the user's instructions first, then the project's rules, then this skill.
 4. **Look at it before the user does.**
    - Take a screenshot with a headless browser at the user's window size, with a time limit (`timeout 40 chrome --headless --screenshot=... --window-size=W,H URL`), in the background when it is slow. Take one for each size and state that the round changes. Crop and enlarge each part too small to judge.
    - Judge each version as the user will see it, not in the close-up: does it read as what it is meant to be? Is anything clipped, misaligned, unreadable or broken? Would the user stop at it, and why?
+   - Look at the pixels, every time. A number is no look: a count of changing frames, a pixel diff, a passing check or a matching hash proves that something moves or loads, not that it looks right.
+   - Look at real size and at 1x as well as 2x, in every place it is shown: embedded in its host (a tile on another site, an iframe, a panel), not only on its own page. What is clean when enlarged can be mush, stripes or moiré at its real size.
+   - Look at every state the controls reach, not only the default: each end of each control, and all ends at once. A state that breaks at an end is a defect, however rare.
+   - When an animation is made of frames, look at a few of them at real size, at different points of its cycle.
    - Fix or remove each version you would reject yourself, and look again. Do not show a round you would not pick from.
    - Check the view itself: everything loads, the close-ups show the right part, the console has no errors.
 5. **Tell the user** only "Look at the tab again", and at most one line: your pick and why, or what you could not fix. Do not describe each version; the labels do that.
