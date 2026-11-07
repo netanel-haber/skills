@@ -1,6 +1,6 @@
 ---
 name: sem-compress
-description: Cleanup-only pass that makes code smaller by removing repetition, dead code, duplicated control flow and needless layers, without changing behavior or packing text. Use when asked to sem-compress, de-bloat, shrink or simplify a file, module or repository while keeping every feature.
+description: "Cleanup-only pass that makes code smaller by removing repetition, dead code, duplicated control flow and needless layers, without changing behavior or packing text. Use when asked to sem-compress, de-bloat, shrink or simplify a file, module or repository while keeping every feature."
 ---
 
 # Semantic compression
@@ -32,17 +32,16 @@ Never make the code even slightly worse to save lines. Stop when the next change
 ## Workflow
 
 1. Read the project's own guidance (README, AGENTS.md, CONTRIBUTING, style config) and the target in full before editing. Follow project rules where they are stricter than this skill.
-2. Establish a baseline: run the formatter, record line counts (and bytes, if size is the goal), and capture the current behavior with whatever proves it: the test suite, a differential run against the old version, golden outputs, screenshots for UI.
+2. Establish a baseline: run the formatter, record line counts (and bytes, if size is the goal), and capture the current behavior with the strongest check below.
 3. Find the largest regions of repetition and wrapper layers first. Sort candidates by how much logic they remove, not how many lines.
 4. Make one simplification at a time. Each must be simpler in both source and expanded form.
 5. After each change: format, run the checks, compare behavior with the baseline. Any difference is a regression to fix or an intentional change to call out.
-6. Measure the final size only after formatting. A delta taken before formatting, or earned by deleting whitespace, is not a result.
-7. If a failure might be environmental, reproduce it on the unmodified baseline before calling it a regression.
+6. If a failure might be environmental, reproduce it on the unmodified baseline before calling it a regression.
 
 ## Proving behavior is unchanged
 
 Use the strongest check available, in this order:
-- A differential run: old and new versions on the same inputs (exhaustive small inputs, edge-case tokens, random inputs), outputs compared line by line.
+- A differential run: old and new versions on the same inputs (exhaustive small inputs, edge cases, random inputs, golden outputs), outputs compared line by line.
 - The project's test suite, plus tests for any path the change touches that the suite misses.
 - For UI: render every state before and after, then pixel-diff the screenshots.
 - For build or tooling scripts: run them, or at least syntax-check them and exercise their argument parsing.

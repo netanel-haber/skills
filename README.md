@@ -6,3 +6,5 @@
 | [visual-loop](visual-loop) | Iterates with the user on anything judged by looking at it, in one view that reloads by itself, and looks at each round in a screenshot first. |
 | [peek](peek) | Looks at every visible change in background screenshots while the work goes on, critiques the pixels and fixes what it finds. |
 | [fractal-incrementality](fractal-incrementality) | Splits every decision, large or small, into the smallest step that gives a real answer, for fast validation. |
+
+Each SKILL.md is at most 1,000 words (`wc -w */SKILL.md`).
