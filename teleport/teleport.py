@@ -21,8 +21,8 @@ HOST's home; send creates it if it is missing, and does nothing else with the pr
   one wins, and the other goes to the stash, ~/.cache/teleport/<run> on HOST.
 - sends each transcript (a .jsonl file) up to its last complete line or, with --cut REGEX, up to its
   last line that matches REGEX: the end of the last finished turn, for a session that still runs.
-- leaves out what the resumed session rebuilds or fetches: environments, dependencies, caches, and
-  files over 10 MiB other than transcripts.
+- leaves out what the resumed session rebuilds or fetches: environments, installed or unpacked packages,
+  dependencies, caches, files over 10 MiB and folders over 50 MiB, other than transcripts.
 - writes the prompt to a file. It adds where the old working directory is, what was left out, and a
   last line: "You have been teleported using <this skill's link>. Recover: ...".
 - opens a tmux window in the working directory, tries the resume line once with a made-up session id
@@ -58,7 +58,7 @@ ID = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{12,
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
 REBUILT = {"node_modules", "__pycache__", ".venv", "venv", "site-packages", ".cache", ".ruff_cache", ".mypy_cache",
            ".pytest_cache", ".tox", ".gradle", ".next", "target"}  # fmt: skip
-BIG = 10 * 2**20
+BIG, BIG_FOLDER = 10 * 2**20, 50 * 2**20
 BIN_DIRS = ["~/.local/bin", "~/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.volta/bin", "~/.cargo/bin",
             "~/.nvm/versions/node/*/bin", "~/.local/share/fnm/node-versions/*/installation/bin",
             "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]  # fmt: skip
@@ -269,11 +269,30 @@ def land(stash):
 # ---------------------------------------------------------------------------------------------------
 
 
+def folder_size(path, limit):
+    """The bytes of the files under PATH other than transcripts, counted up to LIMIT."""
+    total = 0
+    for d, _, names in os.walk(path):
+        for n in names:
+            f = os.path.join(d, n)
+            if not n.endswith(".jsonl") and not os.path.islink(f):
+                total += os.path.getsize(f)
+                if total > limit:
+                    return total
+    return total
+
+
 def rebuilt(path):
-    """True for what the resumed session rebuilds or fetches itself: environments, dependencies, caches
-    and big files other than transcripts."""
+    """True for what the resumed session rebuilds or fetches itself: environments, installed or unpacked
+    packages, dependencies, caches, big files other than transcripts, and big folders of such files."""
     if path.is_dir() and not path.is_symlink():
-        return path.name in REBUILT or (path / "pyvenv.cfg").exists()
+        package = any(c.suffix in (".dist-info", ".egg-info") for c in path.iterdir())
+        return (
+            path.name in REBUILT
+            or (path / "pyvenv.cfg").exists()
+            or package
+            or folder_size(path, BIG_FOLDER) > BIG_FOLDER
+        )
     return path.is_file() and not path.is_symlink() and path.suffix != ".jsonl" and path.stat().st_size > BIG
 
 
