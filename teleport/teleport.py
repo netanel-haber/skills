@@ -9,16 +9,18 @@
 
     teleport.py probe HOST PROGRAM [DIR]                     facts about HOST; changes nothing
     teleport.py send HOST FILE... --run CMD --prompt TEXT    move the session; print the line that resumes it
-    teleport.py wait TRANSCRIPT --end REGEX --busy REGEX     wait until a running session's turn ends
 
-Run probe and send in the session's working directory. The working directory on HOST is DIR (--dir),
-or else the same path, under HOST's home; send creates it if it is missing, and does nothing else
-with the project there. send:
+Run both in the session's working directory, as `uv run --no-project --script teleport.py ...` (uv then
+installs rich for the progress bars, at its versions of the date above, and never touches the project
+there), or with python3. The working directory on HOST is DIR (--dir), or else the same path, under
+HOST's home; send creates it if it is missing, and does nothing else with the project there. send:
 - copies each FILE (a file or a folder of the session) to the same place on HOST: HOST's home, temp
   folder, uid and working directory take the place of this machine's, also where the working directory
   is written into a folder name (with / or each non-alphanumeric as -). LOCAL=REMOTE names the place
   instead. A file replaces HOST's copy, and a folder is merged; where both sides have a file, the newer
   one wins, and the other goes to the stash, ~/.cache/teleport/<run> on HOST.
+- sends each transcript (a .jsonl file) up to its last complete line or, with --cut REGEX, up to its
+  last line that matches REGEX: the end of the last finished turn, for a session that still runs.
 - leaves out what the resumed session rebuilds or fetches: environments, dependencies, caches, and
   files over 10 MiB other than transcripts.
 - writes the prompt to a file. It adds where the old working directory is, what was left out, and a
@@ -27,8 +29,7 @@ with the project there. send:
   (a wrong flag fails, and no session starts), and prints the window and the line.
 
 It knows nothing about agents: the teleport skill (SKILL.md, next to this file) tells it what to move.
-On HOST, it runs a copy of itself with python3 (3.7 or newer). Here, run it with `uv run --script`,
-which installs rich for the progress bars, at its versions of the date above.
+On HOST, it runs a copy of itself with python3 (3.7 or newer).
 """
 
 import argparse
@@ -301,12 +302,19 @@ def bundle(files, meta):
     return [*items, ("meta.json", json.dumps(meta).encode())]
 
 
-def write_tar(out, items, advance):
+def transcript(path, cut):
+    """A transcript up to its last complete line, or, with CUT, up to its last line that matches CUT."""
+    data = path.read_bytes()
+    lines = data[: data.rfind(b"\n") + 1].splitlines(keepends=True)
+    ends = [i for i, x in enumerate(lines) if cut and cut.search(x.decode(errors="replace"))]
+    return b"".join(lines[: ends[-1] + 1] if ends else lines)
+
+
+def write_tar(out, items, cut, advance):
     with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tar:
         for name, src in items:
-            if isinstance(src, bytes) or src.suffix == ".jsonl":  # a transcript: cut before a line still being written
-                data = src if isinstance(src, bytes) else src.read_bytes()
-                data = data if isinstance(src, bytes) else data[: data.rfind(b"\n") + 1]
+            if isinstance(src, bytes) or src.suffix == ".jsonl":
+                data = src if isinstance(src, bytes) else transcript(src, cut)
                 info = tarfile.TarInfo(name)
                 info.size, info.mode = len(data), 0o600
                 info.mtime = time.time() if isinstance(src, bytes) else src.stat().st_mtime
@@ -390,22 +398,6 @@ def cmd_probe(a):
     print(json.dumps(facts, indent=1))
 
 
-def cmd_wait(a):
-    """Wait until the newest line that matches --end is newer than every line that matches --busy, and
-    the transcript has been quiet for 15 seconds."""
-    f, end, busy, t0 = Path(a.transcript).expanduser(), re.compile(a.end), re.compile(a.busy), time.time()
-    with Progress() as bars:
-        task = bars.start(f"wait for the turn in {f.name} to end")
-        while True:
-            lines = f.read_bytes().decode(errors="replace").splitlines()
-            last_end = max((i for i, x in enumerate(lines) if end.search(x)), default=-1)
-            last_busy = max((i for i, x in enumerate(lines) if busy.search(x)), default=-1)
-            if last_end > last_busy and time.time() - f.stat().st_mtime >= 15:
-                break
-            time.sleep(5)
-        bars.done(task, f"the turn ended after {time.time() - t0:.0f} s")
-
-
 def cmd_send(a):
     files = []
     for x in a.files:
@@ -418,7 +410,7 @@ def cmd_send(a):
              "uid": os.getuid(), "cwd": os.path.realpath(os.getcwd())}  # fmt: skip
     meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "local": local,
             "files": [{"from": str(p.resolve()), "to": to} for p, to in files]}  # fmt: skip
-    items, t0 = bundle(files, meta), time.time()
+    items, cut, t0 = bundle(files, meta), re.compile(a.cut) if a.cut else None, time.time()
     total = sum(len(s) if isinstance(s, bytes) else s.lstat().st_size for _, s in items)
     size = f"{len(items)} files ({total / 2**20:.1f} MiB)"
     stash = f'"$HOME"/.cache/teleport/{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(3)}'
@@ -432,7 +424,7 @@ def cmd_send(a):
         threading.Thread(target=lambda: err.append(ssh.stderr.read()), daemon=True).start()
         try:
             with gzip.GzipFile(fileobj=ssh.stdin, mode="wb", compresslevel=1) as z:
-                write_tar(z, items, lambda n: bars.advance(task, n))
+                write_tar(z, items, cut, lambda n: bars.advance(task, n))
             ssh.stdin.close()
         except BrokenPipeError:
             pass
@@ -467,14 +459,9 @@ def main():
     )
     s.add_argument("--prompt", required=True, help="the first message to the resumed session")
     s.add_argument("--dir", help="the working directory on HOST (else the same path, under its home)")
-    w = sub.add_parser("wait", help="wait until a running session's turn ends; touch nothing")
-    w.add_argument("transcript")
-    w.add_argument("--end", required=True, metavar="REGEX", help="a line that ends a turn")
-    w.add_argument(
-        "--busy", required=True, metavar="REGEX", help="a line of the main agent's work: a reply, a tool call"
-    )
+    s.add_argument("--cut", metavar="REGEX", help="send each transcript up to its last line that matches: a turn's end")
     a = ap.parse_args()
-    {"probe": cmd_probe, "send": cmd_send, "wait": cmd_wait}[a.cmd](a)
+    (cmd_probe if a.cmd == "probe" else cmd_send)(a)
 
 
 if __name__ == "__main__":

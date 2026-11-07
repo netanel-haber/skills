@@ -8,14 +8,14 @@ The user names the host, and maybe a directory or a session. Decide the rest, an
 
 Move only what the session needs to resume: its transcript, history, memory and notes. Do nothing with the project: no building, cloning, installing or copying it. The resumed session sets up what it needs.
 
-`teleport.py` does the mechanics and knows nothing about agents. It is next to this file; if you read this from a URL, it is at the same URL with `teleport.py` in place of `SKILL.md`: download it. Read its docstring first. If a part does not fit, change the script or do that part by hand. Run it as `uv run --script <path>` (or `python3 <path>`), outside any sandbox, in the session's working directory.
+`teleport.py` does the mechanics and knows nothing about agents. It is next to this file; if you read this from a URL, it is at the same URL with `teleport.py` in place of `SKILL.md`: download it. Read its docstring first. If a part does not fit, change the script or do that part by hand. Run it as `uv run --no-project --script <path>` (or `python3 <path>`), outside any sandbox, in the session's working directory.
 
 Agents change where they keep sessions and which flags they take, so find each fact by looking. The examples at the end are hints from November 2026.
 
 1. **Find the session.** It is this one, unless the user points at another: an id, a file, a phrase from it, or "the last session in <dir>".
    - Find its files in the agent's config folder (such as `~/.claude` or `~/.codex`): `find <folder> -name '*<id>*'`, or `grep -rl '<phrase>' <folder>`. A phrase that you wrote in this turn finds this session. Take its transcript, everything else named after its id, its project's memory, and its scratchpad, where they exist.
    - Read its working directory, model, effort and permission mode in the latest records of its transcript.
-   - If another session may still run, never message it. Wait only for its main agent to end its turn: `teleport.py wait <transcript> --end <regex> --busy <regex>`. Learn both from its transcript: the record that ends each earlier turn, and the records of the main agent's replies and tool calls. Do not wait for subagents, background tasks, workflows or schedules: they do not move, and the prompt names them.
+   - If another session may still run, never message it and never wait for it: pass `send` the record that ends a turn, as `--cut <regex>` (learn it from the earlier turns in its transcript). The session then moves as of its last finished turn. Its subagents, background tasks, workflows and schedules do not move; the prompt names them.
 2. **Probe the host,** in the session's working directory: `teleport.py probe HOST <agent's program> [DIR]`. DIR is the directory that the user named, or else the same path under the host's home; `send` creates it if it is missing. If the session already runs on the host, or `python3` or `tmux` is missing there, tell the user.
 3. **Write the resume command** from the host's help (in the probe, and in the help of its resume subcommand): resume the id, with the same model, effort and permission mode, where the host has flags for them.
 4. **Write the prompt.** Tell the session:
