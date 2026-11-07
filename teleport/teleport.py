@@ -233,28 +233,21 @@ def open_window(sess, name, d):
     return f"{sess}:{name}"
 
 
-def remove_made_up(budget=10):
-    """Remove what a program made for the made-up id: names that contain it, a few levels deep in the
-    temp folder and in the home folder's hidden folders (not its big caches)."""
-    skip, end = {".cache", ".local", ".npm", ".nvm", ".cargo", ".rustup", ".conda", ".git"}, time.time() + budget
-    roots = [Path(tempfile.gettempdir())] + [p for p in Path.home().glob(".*") if p.is_dir() and p.name not in skip]
-    for root in roots:
-        for d, dirs, names in os.walk(root):
-            for n in [*dirs, *names]:
-                if FAKE_ID in n:
-                    f = os.path.join(d, n)
-                    shutil.rmtree(f, ignore_errors=True) if os.path.isdir(f) else os.remove(f)
-            dirs[:] = [x for x in dirs if FAKE_ID not in x] if len(Path(d).relative_to(root).parts) < 3 else []
-            if time.time() > end:
-                return
+def remove_made_up(near):
+    """Remove what a program made for the made-up id: entries named after it, next to the places where
+    the session's files went (in their folders and the three folders above, two levels deep)."""
+    for folder in {a for p in near for a in list(Path(p).parents)[:3]}:
+        for q in [*folder.glob("*"), *folder.glob("*/*")]:
+            if FAKE_ID in q.name and q.exists():
+                shutil.rmtree(q, ignore_errors=True) if q.is_dir() else q.unlink()
 
 
-def try_line(line, sid, prompt, d):
+def try_line(line, sid, prompt, d, near):
     """The resume line, run once in a throwaway window with a made-up id: a wrong flag fails, and no
     session starts."""
     trial = line.replace(sid, FAKE_ID).replace(str(prompt), "/dev/null")
     out = in_window(f"cd {shlex.quote(d)} && {trial}") or "(no exit after 30 s)"
-    remove_made_up()
+    remove_made_up(near)
     return [x for x in out.splitlines() if x.strip()][:6]
 
 
@@ -268,11 +261,12 @@ def land(stash):
     host = {"home": str(Path.home()), "tmp": tempfile.gettempdir(), "uid": os.getuid()}
     d = host["cwd"] = os.path.realpath(host_dir(meta["dir"], local["cwd"], local["home"], host["home"]))
     os.makedirs(d, exist_ok=True)
-    to_host, notes = mapper(local, host), []
+    to_host, notes, placed = mapper(local, host), [], []
     for i, f in enumerate(meta["files"]):
         dst = Path(os.path.expanduser(f["to"] or to_host(f["from"])))
         place(stash / "files" / str(i), dst, stash / "replaced" / str(i), notes)
         notes.append(f"{f['from']} -> {dst}")
+        placed.append(dst)
     if meta["left_out"]:
         notes.append(f"not sent: {len(meta['left_out'])} environments, packages, caches, builds or artifacts")
     prompt = stash / "prompt.txt"
@@ -304,7 +298,7 @@ def land(stash):
     (stash / "resume.sh").write_text(f"cd {shlex.quote(d)} && {line}\n")
     sid = ID.search(meta["run"])
     window = open_window(os.path.basename(program), f"tp-{sid.group(0)[:8] if sid else secrets.token_hex(3)}", d)
-    check = try_line(line, sid.group(0), prompt, d) if sid else None
+    check = try_line(line, sid.group(0), prompt, d, placed) if sid else None
     sh([find_tmux(), "send-keys", "-t", f"={window}", "-l", line])  # typed in, not run: Enter starts it
     print(MARK + json.dumps({"window": window, "line": line, "notes": notes, "check": check}), flush=True)
 
