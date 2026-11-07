@@ -5,25 +5,34 @@
 # [tool.uv]
 # exclude-newer = "2026-11-01T00:00:00Z"
 # ///
-"""Move a coding-agent session to another machine over SSH, ready to resume there in tmux.
+"""teleport: move a coding-agent session to another machine over SSH, ready to resume in tmux there.
 
-This script decides nothing. It copies what it is told to copy, writes the first prompt to a file,
-opens a tmux window in the working directory, and prints the one line that resumes the session
-there. The teleport skill (SKILL.md, next to this file) finds the paths, commands and flags for
-each agent, version and host.
+    teleport.py probe HOST PROGRAM [DIR]                     facts about HOST; changes nothing
+    teleport.py send HOST FILE... --run CMD --prompt TEXT    move the session; print the line that resumes it
+    teleport.py wait TRANSCRIPT --end REGEX --busy REGEX     wait until a running session's turn ends
 
-    uv run teleport.py probe HOST|--here [--dir DIR] [--session ID] [--find-clone URL ...] [--bin NAME ...]
-    uv run teleport.py send HOST --dir DIR --run CMD --prompt TEXT
-                       [--put LOCAL=REMOTE ...] [--merge LOCAL=REMOTE ...] [--code LOCAL_DIR]
-                       [--path DIR ...] [--tmux-session NAME] [--compress zstd|gzip] [--dry-run]
+Run probe and send in the session's working directory. send:
+- copies each FILE (a file or a folder of the session) to the same place on HOST. A path is mapped by
+  putting HOST's home, temp folder, uid and working directory in place of this machine's, also where
+  the working directory is written into a folder name (with / or each non-alphanumeric as -).
+  LOCAL=REMOTE names the place instead. A file replaces HOST's copy; a folder is merged; where both
+  have a file, the newer one wins. The loser goes to the stash, ~/.cache/teleport/<run> on HOST.
+- brings the code, if the working directory is a git work tree. The working directory on HOST (--dir;
+  by default the same path, under HOST's home) becomes a clone at the same commit if it is missing.
+  If it is clean at that commit, it gets the uncommitted changes and new files; otherwise they wait in
+  the stash. If HOST cannot clone the repository, send sends it along and tries again.
+- writes the prompt to a file, opens a tmux window in the working directory, tries the resume line once
+  with a made-up session id (a wrong flag fails, and no session starts), and prints the window and the
+  line.
 
-Both take --ssh "ARGS" for extra ssh arguments, such as a port. On HOST, the same file runs with
-the system python3 (3.7 or newer) and the standard library only. Here, uv installs rich for the
-progress bars, at the versions of the date above; without it, the progress is plain lines.
+It knows nothing about agents: the teleport skill (SKILL.md, next to this file) tells it what to move.
+On HOST, it runs a copy of itself with python3 (3.7 or newer). Here, uv installs rich for the progress
+bars, at its versions of the date above.
 """
 
 import argparse
 import glob
+import gzip
 import io
 import json
 import os
@@ -31,7 +40,6 @@ import re
 import secrets
 import shlex
 import shutil
-import socket
 import subprocess
 import sys
 import tarfile
@@ -40,43 +48,27 @@ import threading
 import time
 from pathlib import Path
 
-MARK = "@@TELEPORT@@"
+MARK = "@@TELEPORT@@"  # starts the line of JSON that the host sends back
+FAKE_ID = "00000000-0000-0000-0000-000000000000"
+ID = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{12,}\b")  # a session id in --run
 SHELLS = {"sh", "bash", "zsh", "fish", "dash", "ksh", "tcsh", "csh"}
-BIN_DIRS = [
-    "~/.local/bin",
-    "~/bin",
-    "~/.npm-global/bin",
-    "~/.bun/bin",
-    "~/.volta/bin",
-    "~/.cargo/bin",
-    "~/.nvm/versions/node/*/bin",
-    "~/.local/share/fnm/node-versions/*/installation/bin",
-    "~/.asdf/shims",
-    "/usr/local/bin",
-    "/opt/homebrew/bin",
-    "/usr/bin",
-    "/bin",
-]
+BIN_DIRS = ["~/.local/bin", "~/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.volta/bin", "~/.cargo/bin",
+            "~/.nvm/versions/node/*/bin", "~/.local/share/fnm/node-versions/*/installation/bin",
+            "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]  # fmt: skip
 
 
 def sh(cmd, timeout=None, **kw):
-    if "input" not in kw:
-        kw.setdefault("stdin", subprocess.DEVNULL)
+    kw.setdefault("stdin", subprocess.DEVNULL)
     try:
         return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout, **kw)
     except (OSError, subprocess.SubprocessError) as e:
         return subprocess.CompletedProcess(cmd, 127, "", str(e))
 
 
-def emit(**kw):
-    print(MARK + json.dumps(kw), flush=True)
-
-
 def git_state(d):
-    top = sh(["git", "-C", str(d), "rev-parse", "--show-toplevel"])
-    if top.returncode:
+    top = sh(["git", "-C", str(d), "rev-parse", "--show-toplevel"]).stdout.strip()
+    if not top:
         return None
-    top = top.stdout.strip()
     g = ["git", "-C", top]
     return {
         "top": top,
@@ -87,142 +79,92 @@ def git_state(d):
     }
 
 
-# ----------------------------------------------------------------------------------------------
-# On HOST: probe. It reports facts and changes nothing.
-# ----------------------------------------------------------------------------------------------
+def same_path_on_host(cwd, local_home, host_home):
+    """The working directory on HOST: the same path, under HOST's home if it is under the home here."""
+    rel = os.path.relpath(cwd, local_home)
+    return cwd if rel.startswith("..") else os.path.join(host_home, rel)
 
 
-def version_of(path, flag="--version"):
-    env = dict(os.environ, PATH=os.path.dirname(path) + os.pathsep + os.environ.get("PATH", ""))
-    r = sh([path, flag], timeout=30, env=env)
-    for text in (r.stdout, r.stderr):
-        good = [
-            x.strip()
-            for x in text.splitlines()
-            if re.search(r"\d+\.\d+", x) and not x.lower().startswith(("warning", "error"))
-        ]
-        if good:
-            return good[0]
-    return None
+# ---------------------------------------------------------------------------------------------------
+# On HOST: facts.
+# ---------------------------------------------------------------------------------------------------
 
 
-def find_bins(names, shells):
-    """Each program as each shell (login, and login + interactive) and the usual install folders find it."""
-    found = {n: {} for n in names}
-    script = "; ".join(f'printf "%s=%s\\n" {shlex.quote(n)} "$(command -v {shlex.quote(n)})"' for n in names)
-    for s in shells:
-        for flags in ("-lc", "-lic"):
-            for line in sh([s, flags, script], timeout=30).stdout.splitlines():
-                n, sep, p = line.strip().partition("=")
-                if sep and n in found and p.startswith("/") and os.access(p, os.X_OK):
-                    found[n].setdefault(os.path.normpath(p), []).append(f"{os.path.basename(s)} {flags}")
-    for n in names:
-        for d in BIN_DIRS:
-            for p in sorted(glob.glob(os.path.join(os.path.expanduser(d), n))):
-                if os.access(p, os.X_OK) and not os.path.isdir(p):
-                    found[n].setdefault(os.path.normpath(p), []).append("install folder")
-    return {
-        n: [
-            {
-                "path": p,
-                "dir": os.path.dirname(p),
-                "found_by": how,
-                "version": version_of(p, "-V" if n == "tmux" else "--version"),
-            }
-            for p, how in f.items()
-        ]
-        for n, f in found.items()
-    }
+def find_tmux():
+    found = [p for d in BIN_DIRS for p in glob.glob(os.path.expanduser(d) + "/tmux") if os.access(p, os.X_OK)]
+    return shutil.which("tmux") or next(iter(found), None)
 
 
-def in_window(tmux, cmd, timeout=30):
-    """Run CMD in the shell of a new, throwaway tmux window: the place where the resume line will run.
-    Returns its output, or None if tmux is missing or CMD did not finish in time."""
-    if not tmux:
+def in_window(cmd, timeout=30):
+    """Run CMD in the shell of a new, throwaway tmux window, where the resume line will run. Returns its
+    output, or None if there is no tmux or CMD does not finish in time."""
+    tmux = find_tmux()
+    tmp, sess = Path(tempfile.mkdtemp()), f"teleport-{os.getpid()}-{secrets.token_hex(2)}"
+    out = tmp / "out"
+    if not tmux or sh([tmux, "new-session", "-d", "-s", sess]).returncode:
         return None
-    tmp = Path(tempfile.mkdtemp())
-    out, sess = tmp / "out", f"teleport-{os.getpid()}-{secrets.token_hex(2)}"
-    if sh([tmux, "new-session", "-d", "-s", sess]).returncode:
-        return None
-    keys = f"{{ {cmd} ; }} < /dev/null > {out}.part 2>&1; mv {out}.part {out}; exit"
-    sh([tmux, "send-keys", "-t", f"={sess}:", "-l", keys])
+    sh(
+        [
+            tmux,
+            "send-keys",
+            "-t",
+            f"={sess}:",
+            "-l",
+            f"{{ {cmd} ; }} </dev/null >{out}.part 2>&1; mv {out}.part {out}; exit",
+        ]
+    )
     sh([tmux, "send-keys", "-t", f"={sess}:", "Enter"])
     end = time.time() + timeout
     while time.time() < end and not out.exists():
         time.sleep(0.5)
-    sh([tmux, "kill-session", "-t", f"={sess}"])  # also stops CMD if it is still running
+    sh([tmux, "kill-session", "-t", f"={sess}"])  # also stops CMD, if it still runs
     text = out.read_text(errors="replace") if out.exists() else None
     shutil.rmtree(tmp, ignore_errors=True)
     return text
 
 
-def window_finds(tmux, names):
-    """What the shell of a new tmux window finds for each program."""
-    script = "; ".join(f'printf "%s=%s\\n" {shlex.quote(n)} "$(command -v {shlex.quote(n)})"' for n in names)
-    found = {}
-    for line in (in_window(tmux, script) or "").splitlines():
-        n, _, path = line.partition("=")
-        found[n] = path or None
+def find_program(name):
+    """Where login shells and the usual install folders find NAME, its version, and whether a new tmux
+    window finds the same one."""
+    lookup = f"command -v {shlex.quote(name)}"
+    paths = []
+    for shell in {os.environ.get("SHELL") or "/bin/sh", "/bin/bash"}:
+        for flags in ("-lc", "-lic"):
+            paths += sh([shell, flags, lookup], timeout=30).stdout.split()
+    paths += [p for d in BIN_DIRS for p in glob.glob(os.path.expanduser(d) + "/" + name)]
+    window = (in_window(lookup) or "").strip()
+    found = []
+    for p in dict.fromkeys(x for x in paths if x.startswith("/") and os.access(x, os.X_OK)):
+        env = dict(os.environ, PATH=os.path.dirname(p) + os.pathsep + os.environ.get("PATH", ""))
+        v = sh([p, "-V" if name == "tmux" else "--version"], timeout=30, env=env)
+        version = next((x.strip() for x in (v.stdout + v.stderr).splitlines() if re.search(r"\d+\.\d+", x)), None)
+        in_win = bool(window) and os.path.realpath(window) == os.path.realpath(p)
+        found.append({"path": p, "version": version, "in_window": in_win})
     return found
 
 
-def login_env(names):
-    shell = os.environ.get("SHELL") or "/bin/sh"
-    script = "; ".join(f'printf "%s\\n" "${n}"' for n in names)
-    lines = sh([shell, "-lc", script], timeout=20).stdout.splitlines()
-    lines = lines[-len(names) :] if len(lines) >= len(names) else [""] * len(names)
-    return {n: v or None for n, v in zip(names, lines)}
-
-
-def listing(path, n=12):
-    """The newest entries of a folder, two levels deep: how a program names what it keeps there."""
-    p = Path(path).expanduser()
-    if not p.is_dir():
-        return {"exists": p.exists(), "is_dir": False}
-    entries = []
-    for e in p.iterdir():
-        entries.append(e)
-        if e.is_dir() and not e.is_symlink():
-            try:
-                entries += list(e.iterdir())[:200]
-            except OSError:
-                pass
-
-    def mtime(e):
-        try:
-            return e.lstat().st_mtime
-        except OSError:
-            return 0
-
-    newest = sorted(entries, key=mtime, reverse=True)[:n]
-    return {"exists": True, "newest": [str(e.relative_to(p)) + ("/" if e.is_dir() else "") for e in newest]}
-
-
-def processes_in(real):
-    """Processes whose working directory is REAL (Linux): an agent that runs there shows up, however it started."""
+def processes_in(d):
+    """Processes that run in directory D (Linux)."""
     out = []
     for proc in glob.glob("/proc/[0-9]*"):
         try:
-            if os.readlink(proc + "/cwd") == real and int(proc[6:]) != os.getpid():
+            if os.readlink(proc + "/cwd") == d and int(proc[6:]) != os.getpid():
                 with open(proc + "/cmdline", "rb") as f:
-                    args = f.read().replace(b"\0", b" ").decode(errors="replace").strip()
-                out.append(f"{proc[6:]} {args[:200]}")
-        except (OSError, ValueError):
+                    out.append(f"{proc[6:]} " + f.read().replace(b"\0", b" ").decode(errors="replace")[:200])
+        except OSError:
             pass
     return out
 
 
 def norm_url(u):
-    u = re.sub(r"\.git$", "", u.strip().rstrip("/"))
-    u = re.sub(r"^[a-z+]+://", "", u)
-    u = re.sub(r"^[^@/]+@", "", u)
-    head, _, rest = u.partition("/")
-    return (head.replace(":", "/", 1) + ("/" + rest if rest else "")).lower()
+    u = re.sub(r"^[a-z+]+://|\.git$", "", u.strip().rstrip("/"))
+    return re.sub(r"^[^@/]+@", "", u).replace(":", "/", 1).lower()
 
 
-def find_clones(urls, roots, depth=4, budget=15):
+def find_clones(urls, depth=4, budget=15):
+    """Clones of URLS in HOST's home, a few levels deep."""
     want, found, end = {norm_url(u) for u in urls}, [], time.time() + budget
-    stack = [(Path(r).expanduser(), 0) for r in roots]
+    stack = [(Path.home(), 0)]
     while stack and time.time() < end:
         d, k = stack.pop()
         try:
@@ -231,598 +173,449 @@ def find_clones(urls, roots, depth=4, budget=15):
             continue
         if any(e.name == ".git" for e in entries):
             try:
-                cfg = (d / ".git" / "config").read_text(errors="replace")
+                config = (d / ".git" / "config").read_text(errors="replace")
             except OSError:
-                cfg = ""
-            if any(norm_url(u) in want for u in re.findall(r"^\s*url\s*=\s*(\S+)", cfg, re.M)):
+                config = ""
+            if any(norm_url(u) in want for u in re.findall(r"^\s*url\s*=\s*(\S+)", config, re.M)):
                 found.append(os.path.realpath(d))
-            continue
-        if k < depth:
+        elif k < depth:
             stack += [
                 (Path(e.path), k + 1) for e in entries if not e.name.startswith(".") and e.is_dir(follow_symlinks=False)
             ]
-    return {"found": found, "searched_all": not stack}
+    return found
 
 
 def probe(req):
-    env = login_env(req["env"]) if req.get("env") else {}
-    tmux = shutil.which("tmux") or next(
-        iter(glob.glob("/usr/local/bin/tmux") + glob.glob("/opt/homebrew/bin/tmux")), None
-    )
-    tmux_shell = sh([tmux, "show-options", "-gv", "default-shell"]).stdout.strip() if tmux else ""
-    # A new tmux window runs default-shell as a login shell; without a setting, that is the login shell.
-    window_shell = tmux_shell or os.environ.get("SHELL") or "/bin/sh"
-    shells = []
-    for s in (window_shell, os.environ.get("SHELL"), "/bin/bash"):
-        if s and os.path.exists(s) and s not in shells:
-            shells.append(s)
+    home = str(Path.home())
+    d = os.path.expanduser(req["dir"] or same_path_on_host(req["cwd"], req["home"], home))
     u = os.uname()
-    out = {
-        "host": socket.gethostname(),
-        "system": f"{u.sysname} {u.release} {u.machine}",
-        "home": str(Path.home()),
-        "uid": os.getuid(),
-        "tmp": tempfile.gettempdir(),
-        "login_shell": os.environ.get("SHELL"),
-        "window_shell": window_shell,
-        "python": f"{sys.executable} {sys.version.split()[0]}",
-        "zstd": shutil.which("zstd"),
-        "env": env,
-        "ls": {p: listing(p) for p in req.get("ls") or []},
-        "bins": find_bins(list(dict.fromkeys(req["bins"] + ["tmux"])), shells),
-    }
-    window = window_finds(tmux, list(out["bins"]))
-    for n, found in out["bins"].items():
-        for b in found:
-            b["in_window"] = bool(window.get(n)) and os.path.realpath(window[n]) == os.path.realpath(b["path"])
-    if tmux:
-        ls = sh([tmux, "list-sessions", "-F", "#S"])
-        out["tmux_sessions"] = ls.stdout.split() if ls.returncode == 0 else []
-    if req.get("dir"):
-        p = Path(req["dir"]).expanduser()
-        out["dir"] = {"given": req["dir"], "exists": p.is_dir()}
-        if p.is_dir():
-            real = os.path.realpath(p)
-            out["dir"].update(real=real, git=git_state(real), processes_in_it=processes_in(real))
-    if req.get("session"):
-        out["running"] = [
-            line.strip()[:300]
-            for line in sh(["ps", "-eo", "pid=,args="]).stdout.splitlines()
-            if req["session"] in line and "teleport.py" not in line and " _probe " not in line
-        ]
-    if req.get("clones"):
-        out["clones"] = find_clones(req["clones"], req.get("roots") or ["~"])
+    out = {"system": f"{u.sysname} {u.release} {u.machine}", "home": home, "uid": os.getuid(),
+           "tmp": tempfile.gettempdir(), "python": sys.version.split()[0], "tmux": find_tmux(),
+           "program": find_program(req["program"]), "dir": {"path": d, "exists": os.path.isdir(d)}}  # fmt: skip
+    if os.path.isdir(d):
+        real = os.path.realpath(d)
+        out["dir"].update(real=real, git=git_state(real), processes=processes_in(real))
+    best = [p["path"] for p in out["program"] if p["in_window"]] + [p["path"] for p in out["program"]]
+    if best:
+        env = dict(os.environ, PATH=os.path.dirname(best[0]) + os.pathsep + os.environ.get("PATH", ""))
+        h = sh([best[0], "--help"], timeout=30, env=env)
+        out["help"] = (h.stdout or h.stderr).splitlines()[:80]
+    if req["remotes"]:
+        out["clones"] = find_clones(req["remotes"])
     return out
 
 
-# ----------------------------------------------------------------------------------------------
-# On HOST: land. It places the files, writes the prompt and opens the tmux window.
-# ----------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------
+# On HOST: land. Place the files, bring the code, write the prompt, open the window, try the line.
+# ---------------------------------------------------------------------------------------------------
+
+
+def mapper(local, host):
+    """Map a path here to the same place on HOST: home, temp folder, uid and working directory, also as
+    written into folder names. One pass, longest match first, so a replacement is never replaced."""
+    subs = {}
+    for enc in (lambda p: p, lambda p: p.replace("/", "-"), lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)):
+        subs[enc(local["cwd"])] = enc(host["cwd"])
+    subs.update({local["home"]: host["home"], local["tmp"]: host["tmp"]})
+    keys = sorted((k for k in subs if k), key=len, reverse=True)
+    pattern = re.compile("|".join(map(re.escape, keys)) + rf"|(?<![0-9]){local['uid']}(?![0-9])")
+    return lambda p: pattern.sub(lambda m: subs.get(m.group(0), str(host["uid"])), p)
 
 
 def same_file(a, b):
-    return (
-        a.is_file()
-        and b.is_file()
-        and not b.is_symlink()
-        and a.stat().st_size == b.stat().st_size
-        and a.read_bytes() == b.read_bytes()
-    )
+    return a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()
 
 
 def place(src, dst, keep, notes):
-    """Move SRC to DST. What DST held before moves to KEEP."""
-    if not src.exists():  # an empty folder sends no entries
-        src.mkdir(parents=True)
-    if dst.exists() or dst.is_symlink():
-        if same_file(src, dst):
-            return
+    """Put SRC at DST. A folder is merged file by file. Where DST has another file, the newer one wins,
+    and the other moves to KEEP."""
+    if src.is_dir():
+        for f in sorted(p for p in src.rglob("*") if p.is_file()):
+            place(f, dst / f.relative_to(src), keep / f.relative_to(src), notes)
+        return
+    if same_file(src, dst):  # already there: the stash keeps only what was replaced
+        src.unlink()
+        return
+    if dst.is_file():
+        loser = src if dst.stat().st_mtime > src.stat().st_mtime else dst
         keep.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(dst), str(keep))
-        notes.append(f"{dst} was replaced; its old copy is {keep}")
+        shutil.move(str(loser), str(keep))
+        notes.append(
+            f"{dst}: kept the {'copy on this host' if loser == src else 'copy sent'}, the newer; the other is {keep}"
+        )
+        if loser == src:
+            return
     dst.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dst))
 
 
-def merge(src, dst, conflicts):
-    """Copy the files of SRC into DST. A file that DST holds with other content stays; SRC's goes to CONFLICTS."""
-    if not src.exists():
-        return 0
-    files = [src] if src.is_file() else sorted(p for p in src.rglob("*") if p.is_file())
-    kept = 0
-    for f in files:
-        rel = Path(f.name) if f == src else f.relative_to(src)
-        target = dst if f == src else dst / rel
-        if target.exists() and not same_file(f, target):
-            target, kept = conflicts / rel, kept + 1
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(f, target)
-    return kept
-
-
-def already_applied(top, patch, untracked):
-    """True if the work tree at TOP already holds the patch and the new files."""
-    if patch.exists() and sh(["git", "-C", top, "apply", "--check", "--reverse", "--binary", str(patch)]).returncode:
-        return False
-    if untracked.exists():
-        with tarfile.open(untracked) as t:
-            for m in t.getmembers():
-                f = t.extractfile(m) if m.isfile() else None
-                target = Path(top) / m.name
-                if f is None or not target.is_file() or target.read_bytes() != f.read():
-                    return False
-    return patch.exists() or untracked.exists()
-
-
 def https_of(url):
-    """git@host:owner/repo -> https://host/owner/repo, so a host without ssh keys can still clone."""
     m = re.match(r"^(?:ssh://)?git@([^:/]+)[:/](.+)$", url)
     return f"https://{m.group(1)}/{m.group(2)}" if m else None
 
 
-def make_clone(code, d):
-    """Create D as a clone of the old work tree's repository, at its commit. Sources, in order: the
-    repository bundle (--ship-repo), then each remote, by its own URL and by https."""
-    info = json.loads((code / "info.json").read_text())
+def clone(code, d, info):
+    """Make D a clone at the old commit: from the repository sent along, or else from each remote."""
     sources = [str(code / "repo.bundle")] if (code / "repo.bundle").exists() else []
-    for u in info["remotes"]:
-        sources += [u] + ([https_of(u)] if https_of(u) else [])
+    sources += [x for u in info["remotes"] for x in (u, https_of(u)) if x]
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_SSH_COMMAND="ssh -o BatchMode=yes")
-    errors = []
     for src in sources:
         partial = [] if src.endswith(".bundle") else ["--filter=blob:none"]
-        r = sh(["git", "clone", "--quiet", "--no-checkout", *partial, src, d], timeout=3600, env=env)
-        if r.returncode == 0:
+        if sh(["git", "clone", "-q", "--no-checkout", *partial, src, d], timeout=3600, env=env).returncode == 0:
             break
-        errors.append(f"{src}: {(r.stderr.strip().splitlines() or ['failed'])[-1]}")
         shutil.rmtree(d, ignore_errors=True)
     else:
-        return (
-            None,
-            f"could not create {d} (send again with --ship-repo): no clone source worked: {'; '.join(errors)[:400]}",
-        )
+        return None
     g = ["git", "-C", d]
-    if src.endswith(".bundle") and info["remotes"]:  # point origin back at the real repository
+    if src.endswith(".bundle") and info["remotes"]:
         sh(g + ["remote", "set-url", "origin", info["remotes"][0]])
-    if (code / "commits.bundle").exists():  # commits that are on no remote
-        sh(g + ["fetch", "--quiet", str(code / "commits.bundle"), "HEAD"], env=env)
-    if sh(g + ["cat-file", "-e", info["head"] + "^{commit}"]).returncode:
-        sh(g + ["fetch", "--quiet", "origin", info["head"]], timeout=3600, env=env)
+    if (code / "commits.bundle").exists():
+        sh(g + ["fetch", "-q", str(code / "commits.bundle"), "HEAD"], env=env)
     target = ["-B", info["branch"], info["head"]] if info["branch"] else ["--detach", info["head"]]
-    r = sh(g + ["checkout", "--quiet", *target], timeout=3600, env=env)
-    if r.returncode:
-        return None, f"cloned {src} into {d}, but could not check out {info['head'][:12]}: {r.stderr.strip()[:300]}"
-    return f"created {d} as a clone of {src} at {info['head'][:12]}", None
+    if sh(g + ["checkout", "-q", *target], timeout=3600, env=env).returncode:
+        return None
+    return f"created {d} as a clone of {'the repository sent along' if src.endswith('.bundle') else src} at {info['head'][:12]}"
 
 
-def apply_code(code, d):
+def bring_code(code, d, notes):
+    """Bring the old work tree's code to D, only where that is safe. None: send the repository along."""
     info = json.loads((code / "info.json").read_text())
-    patch, untracked = code / "uncommitted.patch", code / "untracked.tar"
+    patch, new = code / "uncommitted.patch", code / "untracked.tar"
+    if not os.path.isdir(d):
+        made = clone(code, d, info)
+        if not made:
+            return None
+        notes.append(made)
     here = git_state(d)
-    where = (
-        f"The snapshot is in {code}: info.json, and whichever exist of uncommitted.patch (git apply"
-        " --binary), untracked.tar (new files) and commits.bundle (commits on no remote; git fetch it)."
-    )
+    stash = f"The snapshot is in {code}: uncommitted.patch (git apply), untracked.tar, commits.bundle (git fetch)."
     if not here:
-        return f"not applied: {d} is not a git repository. {where}"
+        return f"not applied: {d} is not a git work tree. {stash}"
     if here["head"] != info["head"]:
-        return (
-            f"not applied: HEAD here is {(here['head'] or 'none')[:12]}, the old HEAD was"
-            f" {(info['head'] or 'none')[:12]} ({info.get('branch') or 'detached'}). {where}"
-        )
-    if here["dirty"] and already_applied(here["top"], patch, untracked):
-        return f"already applied to {here['top']} (by an earlier send)"
-    if here["dirty"]:
-        return f"not applied: the work tree here has uncommitted changes. {where}"
-    if not patch.exists() and not untracked.exists():
-        return f"nothing to apply: both work trees are clean at {info['head'][:12]}"
-    if patch.exists():
-        check = sh(["git", "-C", here["top"], "apply", "--check", "--binary", str(patch)])
-        if check.returncode:
-            return f"not applied: git apply --check failed: {check.stderr.strip()[:300]}. {where}"
-    if untracked.exists():
-        with tarfile.open(untracked) as t:
-            taken = [m.name for m in t.getmembers() if (Path(here["top"]) / m.name).exists()]
-        if taken:
-            return f"not applied: these new files already exist here: {', '.join(taken[:5])}. {where}"
-    if patch.exists():
-        sh(["git", "-C", here["top"], "apply", "--binary", str(patch)]).check_returncode()
-    if untracked.exists():
-        with tarfile.open(untracked) as t:
-            t.extractall(here["top"], **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
-    return f"applied to {here['top']}: the uncommitted changes and the new files of the old work tree"
+        return f"not applied: HEAD here is {(here['head'] or '-')[:12]}, the old HEAD was {info['head'][:12]}. {stash}"
+    top = here["top"]
+    if not patch.exists() and not new.exists():
+        return "nothing to apply: the old work tree was clean"
+    if here["dirty"]:  # applied already, by an earlier send?
+        applied = not patch.exists() or not sh(["git", "-C", top, "apply", "--check", "-R", str(patch)]).returncode
+        if applied and new.exists():
+            with tarfile.open(new) as t:
+                files = [m for m in t.getmembers() if m.isfile()]
+                applied = all(same_bytes(Path(top) / m.name, t.extractfile(m).read()) for m in files)
+        return f"already applied to {top}" if applied else f"not applied: the work tree here has other changes. {stash}"
+    if patch.exists() and sh(["git", "-C", top, "apply", "--binary", str(patch)]).returncode:
+        return f"not applied: git apply failed. {stash}"
+    if new.exists():
+        with tarfile.open(new) as t:
+            t.extractall(top, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+    return f"applied to {top}: the uncommitted changes and the new files"
 
 
-def open_window(tmux, sess, win, d):
+def same_bytes(path, data):
+    return path.is_file() and path.read_bytes() == data
+
+
+def open_window(sess, name, d):
+    """A detached tmux window in D. A window of an earlier send that sits at a shell prompt is replaced."""
+    tmux = find_tmux()
     has = sh([tmux, "has-session", "-t", f"={sess}"]).returncode == 0
     names = sh([tmux, "list-windows", "-t", f"={sess}", "-F", "#W"]).stdout.split() if has else []
-    if win in names:  # a window of an earlier send: reuse it if it only shows a shell prompt
-        cur = sh([tmux, "display-message", "-p", "-t", f"={sess}:{win}", "#{pane_current_command}"]).stdout.strip()
-        if cur in SHELLS:
-            sh([tmux, "kill-window", "-t", f"={sess}:{win}"])
-            names.remove(win)
-    base, i = win, 2
-    while win in names:
-        win, i = f"{base}-{i}", i + 1
+    if name in names:
+        cmd = sh([tmux, "display-message", "-p", "-t", f"={sess}:{name}", "#{pane_current_command}"]).stdout.strip()
+        if cmd in SHELLS:
+            sh([tmux, "kill-window", "-t", f"={sess}:{name}"])
+            names.remove(name)
+    base, i = name, 2
+    while name in names:
+        name, i = f"{base}-{i}", i + 1
     where = ["new-window", "-d", "-t", f"={sess}:"] if has else ["new-session", "-d", "-s", sess]
-    r = sh([tmux] + where + ["-n", win, "-c", d])
+    r = sh([tmux, *where, "-n", name, "-c", d])
     if r.returncode:
-        raise RuntimeError(f"tmux failed: {r.stderr.strip()}")
-    return f"{sess}:{win}"
+        raise RuntimeError(f"tmux: {r.stderr.strip()}")
+    return f"{sess}:{name}"
 
 
 def land(stash):
     stash = Path(stash)
     meta = json.loads((stash / "meta.json").read_text())
-    notes = []
-    for i, dst in enumerate(meta["put"]):
-        place(stash / "put" / str(i), Path(dst).expanduser(), stash / "replaced" / str(i), notes)
-    for i, dst in enumerate(meta["merge"]):
-        kept = merge(stash / "merge" / str(i), Path(dst).expanduser(), stash / "conflicts" / str(i))
-        if kept:
-            notes.append(
-                f"{kept} files in {dst} differ here and were kept; the old machine's copies are in"
-                f" {stash / 'conflicts' / str(i)}"
-            )
-    d = os.path.realpath(os.path.expanduser(meta["dir"]))
-    has_code = (stash / "code" / "info.json").is_file()
+    local = meta["local"]
+    host = {"home": str(Path.home()), "tmp": tempfile.gettempdir(), "uid": os.getuid()}
+    d = host["cwd"] = os.path.realpath(
+        os.path.expanduser(meta["dir"] or same_path_on_host(local["cwd"], local["home"], host["home"]))
+    )
+    to_host, notes = mapper(local, host), []
+    for i, f in enumerate(meta["files"]):
+        dst = Path(os.path.expanduser(f["to"] or to_host(f["from"])))
+        place(stash / "files" / str(i), dst, stash / "replaced" / str(i), notes)
+        notes.append(f"{f['from']} -> {dst}")
     code = None
-    if not os.path.isdir(d):  # a missing directory becomes a clone of the session's repository, or empty
-        made, failed = make_clone(stash / "code", d) if has_code else (None, None)
-        if failed:
-            raise RuntimeError(failed)
-        if made:
-            notes.append(made)
-        os.makedirs(d, exist_ok=True)
-    if has_code:
-        code = apply_code(stash / "code", d)
-    text = meta["prompt"] + (f"\n\nCode from the old machine: {code}" if code else "")
+    if (stash / "code" / "info.json").exists():
+        code = bring_code(stash / "code", d, notes)
+        if code is None:
+            print(MARK + json.dumps({"need_repo": True}), flush=True)
+            return
+    os.makedirs(d, exist_ok=True)
     prompt = stash / "prompt.txt"
-    prompt.write_text(text + "".join(f"\nNote: {n}." for n in notes) + "\n")
-    path = ":".join(shlex.quote(os.path.expanduser(p)) for p in meta["path"])
-    line = (f'PATH={path}:"$PATH" ' if path else "") + f'{meta["run"]} "$(cat {shlex.quote(str(prompt))})"'
-    (stash / "resume.sh").write_text(f"cd {shlex.quote(d)} && {line}\n")
+    prompt.write_text(meta["prompt"] + (f"\n\nCode: {code}" if code else "") + "\n")
+    program = next(w for w in shlex.split(meta["run"]) if "=" not in w)
+    found = (in_window(f"command -v {shlex.quote(program)}") or "").strip()
+    path = "" if found else next((p["path"] for p in find_program(program)), "")
+    line = (
+        f'PATH={shlex.quote(os.path.dirname(path))}:"$PATH" ' if path else ""
+    ) + f'{meta["run"]} "$(cat {shlex.quote(str(prompt))})"'
+    sid = ID.search(meta["run"])
+    window = open_window(os.path.basename(program), f"tp-{sid.group(0)[:8] if sid else secrets.token_hex(3)}", d)
     check = None
-    if meta.get("session") and meta["session"] in meta["run"]:
-        # The same line with a made-up session id: a wrong flag fails here, and no session starts.
-        fake = line.replace(meta["session"], "00000000-0000-0000-0000-000000000000")
-        out = in_window(meta["tmux"], f"cd {shlex.quote(d)} && {fake.replace(str(prompt), '/dev/null')}")
-        out = "(no exit after 30 s; stopped)" if out is None else out
-        check = [x for x in out.splitlines() if x.strip()][:6] or ["exit 0, no output"]
-    target = open_window(meta["tmux"], meta["tmux_session"], meta["window"], d)
-    emit(event="done", target=target, dir=d, line=line, code=code, notes=notes, stash=str(stash), check=check)
+    if sid:  # the line with a made-up id: a wrong flag fails here, and no session starts
+        out = in_window(
+            f"cd {shlex.quote(d)} && " + line.replace(sid.group(0), FAKE_ID).replace(str(prompt), "/dev/null")
+        )
+        check = [x for x in (out or "(no exit after 30 s)").splitlines() if x.strip()][:6]
+    print(MARK + json.dumps({"window": window, "line": line, "code": code, "notes": notes, "check": check}), flush=True)
 
 
-# ----------------------------------------------------------------------------------------------
-# Here: progress, the git snapshot, and the stream to HOST.
-# ----------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------
+# Here: progress, the code snapshot, and the stream to HOST.
+# ---------------------------------------------------------------------------------------------------
 
 
-class UI:
+class Progress:
     """Progress bars on stderr with rich, or plain lines without it."""
 
     def __init__(self):
         try:
             from rich.console import Console
-            from rich.progress import (
-                BarColumn,
-                DownloadColumn,
-                Progress,
-                ProgressColumn,
-                SpinnerColumn,
-                TextColumn,
-                TimeElapsedColumn,
-                TransferSpeedColumn,
-            )
-            from rich.text import Text
+            from rich.progress import BarColumn, SpinnerColumn, TextColumn, TimeElapsedColumn
+            from rich.progress import Progress as Bars
 
-            class Bytes(ProgressColumn):
-                def __init__(self, inner):
-                    super().__init__()
-                    self.inner = inner
-
-                def render(self, task):
-                    return self.inner.render(task) if task.fields.get("bytes") else Text("")
-
-            self.p = Progress(
-                SpinnerColumn(finished_text="[green]✓"),
+            columns = (
+                SpinnerColumn(finished_text="✓"),
                 TextColumn("{task.description}"),
                 BarColumn(),
-                Bytes(DownloadColumn()),
-                Bytes(TransferSpeedColumn()),
                 TimeElapsedColumn(),
-                console=Console(stderr=True, width=None if sys.stderr.isatty() else 120),
             )
-        except Exception:  # no rich, or a rich that changed: plain lines
-            self.p = None
-        self.t0 = {}
+            self.bars = Bars(*columns, console=Console(stderr=True, width=None if sys.stderr.isatty() else 120))
+        except Exception:  # no rich, or a rich that changed
+            self.bars = None
 
     def __enter__(self):
-        if self.p:
-            self.p.__enter__()
+        if self.bars:
+            self.bars.__enter__()
         return self
 
     def __exit__(self, *exc):
-        if self.p:
-            self.p.__exit__(*exc)
+        if self.bars:
+            self.bars.__exit__(*exc)
 
-    def task(self, desc, total=None):
-        if self.p:
-            t = self.p.add_task(desc, total=total, bytes=total is not None)
+    def start(self, text, total=None):
+        if not self.bars:
+            print(f"...  {text}", file=sys.stderr, flush=True)
+        return self.bars.add_task(text, total=total) if self.bars else text
+
+    def advance(self, task, n):
+        if self.bars:
+            self.bars.advance(task, n)
+
+    def done(self, task, text):
+        if self.bars:
+            self.bars.update(task, description=text, total=1, completed=1)
         else:
-            t = len(self.t0)
-            print(f"...  {desc}", file=sys.stderr, flush=True)
-        self.t0[t] = time.time()
-        return t
-
-    def advance(self, t, n):
-        if self.p:
-            self.p.advance(t, n)
-
-    def done(self, t, desc=None):
-        if self.p:
-            task = next(x for x in self.p.tasks if x.id == t)
-            total = task.total or task.completed or 1
-            self.p.update(t, description=desc or task.description, total=total, completed=total)
-            self.p.stop_task(t)
-        else:
-            print(f"done {desc or ''} ({time.time() - self.t0[t]:.1f} s)", file=sys.stderr, flush=True)
+            print(f"done {text}", file=sys.stderr, flush=True)
 
 
-def ssh_cmd(host, extra):
-    """ssh to HOST. It shares one connection: the user's, if their ssh config sets one up, else its own."""
-    opts = ["BatchMode=yes", "ConnectTimeout=20"]
-    config = sh(["ssh", "-G", *shlex.split(extra), host]).stdout.lower()
-    if not re.search(r"^controlpath (?!none$)", config, re.M):
+def ssh_cmd(host):
+    """ssh to HOST over one shared connection: the user's, if their ssh config makes one, else its own."""
+    opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
+    if not re.search(r"^controlpath (?!none$)", sh(["ssh", "-G", host]).stdout.lower(), re.M):
         ctl = os.path.join(tempfile.gettempdir(), "teleport-ssh-%C")
-        opts += ["ControlMaster=auto", f"ControlPath={ctl}", "ControlPersist=60"]
-    return ["ssh"] + [x for o in opts for x in ("-o", o)] + shlex.split(extra) + [host]
+        opts += ["-o", "ControlMaster=auto", "-o", f"ControlPath={ctl}", "-o", "ControlPersist=60"]
+    return ["ssh", *opts, host]
 
 
 def die(msg):
     sys.exit(f"teleport: {msg}")
 
 
-def snapshot_code(d):
-    """The git state of the work tree at D, as (name, bytes) pairs: what a clone of it lacks."""
+def snapshot(d, with_repo):
+    """What a clone of the work tree at D lacks: uncommitted changes, new files, commits on no remote."""
     st = git_state(d)
     if not st or not st["head"]:
         return None, []
-    g, out = ["git", "-C", st["top"]], []
+    g, files, tmp = ["git", "-C", st["top"]], [], Path(tempfile.mkdtemp())
     diff = subprocess.run(g + ["diff", "--binary", "HEAD"], capture_output=True, check=True).stdout
     if diff:
-        out.append(("uncommitted.patch", diff))
-    listed = subprocess.run(g + ["ls-files", "-z", "--others", "--exclude-standard"], capture_output=True, check=True)
-    names = [n.decode() for n in listed.stdout.split(b"\0") if n]
+        files.append(("uncommitted.patch", diff))
+    names = [n for n in sh(g + ["ls-files", "-z", "--others", "--exclude-standard"]).stdout.split("\0") if n]
     if names:
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as t:
             for n in names:
                 t.add(os.path.join(st["top"], n), arcname=n, recursive=False)
-        out.append(("untracked.tar", buf.getvalue()))
+        files.append(("untracked.tar", buf.getvalue()))
     st["unpushed"] = int(sh(g + ["rev-list", "--count", "HEAD", "--not", "--remotes"]).stdout or 0)
     if st["unpushed"]:
-        with tempfile.TemporaryDirectory() as tmp:
-            b = Path(tmp) / "commits.bundle"
-            sh(g + ["bundle", "create", "-q", str(b), "HEAD", "--not", "--remotes"]).check_returncode()
-            out.append(("commits.bundle", b.read_bytes()))
-    st["untracked"] = len(names)
-    out.append(("info.json", json.dumps(st, indent=1).encode()))
-    return st, [(f"code/{n}", data) for n, data in out]
-
-
-def walk(path, arc):
-    if not path.is_dir() or path.is_symlink():
-        return [(arc, path)]
-    return [(f"{arc}/{p.relative_to(path)}", p) for p in sorted(path.rglob("*")) if not p.is_dir() or p.is_symlink()]
-
-
-def size_of(src):
-    return len(src) if isinstance(src, bytes) else (src.lstat().st_size if src.is_file() else 0)
+        sh(g + ["bundle", "create", "-q", str(tmp / "commits.bundle"), "HEAD", "--not", "--remotes"]).check_returncode()
+        files.append(("commits.bundle", tmp / "commits.bundle"))
+    if with_repo:
+        sh(g + ["bundle", "create", "-q", str(tmp / "repo.bundle"), "--all"]).check_returncode()
+        files.append(("repo.bundle", tmp / "repo.bundle"))
+    st["new_files"] = len(names)
+    files.append(("info.json", json.dumps(st).encode()))
+    return st, [(f"code/{name}", data) for name, data in files]
 
 
 def write_tar(out, entries, advance):
     with tarfile.open(fileobj=out, mode="w|", format=tarfile.PAX_FORMAT) as tar:
         for arc, src in entries:
-            if isinstance(src, bytes) or (src.is_file() and not src.is_symlink() and src.suffix == ".jsonl"):
+            if isinstance(src, bytes) or src.suffix == ".jsonl":  # a transcript: cut before a line still being written
                 data = src if isinstance(src, bytes) else src.read_bytes()
-                if not isinstance(src, bytes):
-                    data = data[: data.rfind(b"\n") + 1]  # drop a line that is still being written
-                ti = tarfile.TarInfo(arc)
-                ti.size, ti.mtime, ti.mode = len(data), time.time(), 0o600
-                tar.addfile(ti, io.BytesIO(data))
-            elif src.is_file() and not src.is_symlink():
-                ti = tar.gettarinfo(str(src), arcname=arc)
-                with open(src, "rb") as f:
-                    tar.addfile(ti, f)
+                data = data if isinstance(src, bytes) else data[: data.rfind(b"\n") + 1]
+                info = tarfile.TarInfo(arc)
+                info.size, info.mode = len(data), 0o600
+                info.mtime = time.time() if isinstance(src, bytes) else src.stat().st_mtime
+                tar.addfile(info, io.BytesIO(data))
             else:
                 tar.add(str(src), arcname=arc, recursive=False)
-            advance(size_of(src))
+            advance(len(src) if isinstance(src, bytes) else src.lstat().st_size)
 
 
-def pairs(items, flag):
-    out = []
-    for x in items:
-        local, sep, remote = x.partition("=")
-        if not sep or not local or not remote:
-            die(f"{flag} takes LOCAL=REMOTE, not {x!r}")
-        if not Path(local).expanduser().exists():
-            die(f"{flag}: {local} does not exist here")
-        out.append((Path(local).expanduser(), remote))
-    return out
+def from_host(text):
+    return next((json.loads(x[len(MARK) :]) for x in text.splitlines() if x.startswith(MARK)), None)
 
 
 def cmd_probe(a):
-    req = {"bins": a.bin, "dir": a.dir, "session": a.session, "env": a.env, "ls": a.ls}
-    req.update(clones=a.find_clone, roots=a.search_root)
-    if a.here:
-        print(json.dumps(probe(req), indent=1))
-        return
-    if not a.host:
-        die("probe needs HOST, or --here for this machine")
-    with UI() as ui:
-        t = ui.task(f"probe {a.host}")
-        r = subprocess.run(
-            ssh_cmd(a.host, a.ssh) + [f"{a.python} -I - _probe {shlex.quote(json.dumps(req))}"],
-            input=Path(__file__).read_bytes(),
-            capture_output=True,
-        )
-        ui.done(t)
-    out = r.stdout.decode(errors="replace")
-    for line in out.splitlines():
-        if line.startswith(MARK):
-            print(json.dumps(json.loads(line[len(MARK) :]), indent=1))
-            return
-    die(
-        f"the probe on {a.host} failed (exit {r.returncode}):\n{out[-1500:]}{r.stderr.decode(errors='replace')[-1500:]}"
+    st = git_state(os.getcwd())
+    req = {"program": a.program, "dir": a.dir, "cwd": os.path.realpath(os.getcwd()), "home": str(Path.home()),
+           "remotes": st["remotes"] if st else []}  # fmt: skip
+    with Progress() as bars:
+        task = bars.start(f"probe {a.host}")
+        cmd = f"python3 -I - _probe {shlex.quote(json.dumps(req))}"
+        r = subprocess.run(ssh_cmd(a.host) + [cmd], input=Path(__file__).read_bytes(), capture_output=True)
+        bars.done(task, f"probed {a.host}")
+    facts = from_host(r.stdout.decode(errors="replace"))
+    if facts is None:
+        die(f"the probe on {a.host} failed: {r.stderr.decode(errors='replace')[-1500:]}")
+    print(json.dumps(facts, indent=1))
+
+
+def cmd_wait(a):
+    """Wait until the newest line that matches --end is newer than every line that matches --busy, and
+    the transcript has been quiet for 15 seconds."""
+    f, end, busy, t0 = Path(a.transcript).expanduser(), re.compile(a.end), re.compile(a.busy), time.time()
+    with Progress() as bars:
+        task = bars.start(f"wait for the turn in {f.name} to end")
+        while True:
+            lines = f.read_bytes().decode(errors="replace").splitlines()
+            last_end = max((i for i, x in enumerate(lines) if end.search(x)), default=-1)
+            last_busy = max((i for i, x in enumerate(lines) if busy.search(x)), default=-1)
+            if last_end > last_busy and time.time() - f.stat().st_mtime >= 15:
+                break
+            time.sleep(5)
+        bars.done(task, f"the turn ended after {time.time() - t0:.0f} s")
+
+
+def entries(files, meta, code):
+    out = [("teleport.py", Path(__file__).resolve()), ("meta.json", json.dumps(meta).encode()), *code]
+    for i, (p, _) in enumerate(files):
+        if p.is_dir():
+            out += [(f"files/{i}/{q.relative_to(p)}", q) for q in sorted(p.rglob("*")) if q.is_file() or q.is_symlink()]
+        else:
+            out.append((f"files/{i}", p))
+    return out
+
+
+def send_once(host, items, bars):
+    total = sum(len(s) if isinstance(s, bytes) else s.lstat().st_size for _, s in items)
+    task = bars.start(f"send {len(items)} files ({total / 2**20:.1f} MiB) to {host}", total)
+    stash = f'"$HOME"/.cache/teleport/{time.strftime("%Y%m%d-%H%M%S")}-{secrets.token_hex(3)}'
+    remote = f'set -e; umask 077; S={stash}; mkdir -p "$S"; cd "$S"; gzip -dc | tar -xf -; exec python3 -I "$S/teleport.py" _land "$S"'
+    ssh = subprocess.Popen(
+        ssh_cmd(host) + [remote], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
+    err = []
+    threading.Thread(target=lambda: err.append(ssh.stderr.read()), daemon=True).start()
+    try:
+        with gzip.GzipFile(fileobj=ssh.stdin, mode="wb", compresslevel=1) as z:
+            write_tar(z, items, lambda n: bars.advance(task, n))
+        ssh.stdin.close()
+    except BrokenPipeError:
+        pass
+    bars.done(task, f"sent {len(items)} files ({total / 2**20:.1f} MiB) to {host}")
+    task = bars.start("place them, open the window, try the line")
+    result = from_host(ssh.stdout.read().decode(errors="replace"))
+    ssh.wait()
+    if not result:
+        die(f"on {host}: {b''.join(err).decode(errors='replace')[-2000:]}")
+    bars.done(task, f"opened {result['window']}" if "window" in result else f"{host} cannot clone the repository")
+    return result
 
 
 def cmd_send(a):
-    puts, merges = pairs(a.put, "--put"), pairs(a.merge, "--merge")
-    if a.compress == "zstd" and not shutil.which("zstd"):
-        die("--compress zstd needs zstd here; use gzip")
-    nonce = secrets.token_hex(4)
-    meta = {"dir": a.dir, "run": a.run, "prompt": a.prompt, "path": a.path, "tmux": a.tmux, "session": a.session}
-    meta.update(tmux_session=a.tmux_session, window=a.window or f"tp-{(a.session or nonce)[:8]}")
-    meta.update(put=[r for _, r in puts], merge=[r for _, r in merges])
-    name = f"{time.strftime('%Y%m%d-%H%M%S')}-{nonce}"
-    stash = shlex.quote(a.stash) if a.stash else f'"$HOME"/.cache/teleport/{name}'
-    decompress = "zstd -dcq" if a.compress == "zstd" else "gzip -dc"
-    remote = (
-        f'set -e; umask 077; S={stash}; mkdir -p "$S"; cd "$S"; {decompress} | tar -xf -;'
-        f' exec {a.python} -I "$S/teleport.py" _land "$S"'
-    )
-    t_start = time.time()
-    with UI() as ui:
-        entries = [("teleport.py", Path(__file__).resolve())]
-        for i, (local, _) in enumerate(puts):
-            entries += walk(local, f"put/{i}")
-        for i, (local, _) in enumerate(merges):
-            entries += walk(local, f"merge/{i}")
-        if a.code:
-            t = ui.task("snapshot the git state")
-            st, code = snapshot_code(a.code)
-            entries += code
-            if a.ship_repo and st:
-                bundle = Path(tempfile.mkdtemp()) / "repo.bundle"
-                sh(["git", "-C", st["top"], "bundle", "create", "-q", str(bundle), "--all"]).check_returncode()
-                entries.append(("code/repo.bundle", bundle))
-            state = "uncommitted changes" if st and st["dirty"] else "clean"
-            ui.done(
-                t,
-                f"git: HEAD {st['head'][:12]}, {state}, {st['untracked']} new files,"
-                f" {st['unpushed']} commits on no remote"
-                if st
-                else "git: not a work tree with commits; nothing to send",
+    files = []
+    for x in a.files:
+        local, _, to = x.partition("=")
+        path = Path(local).expanduser()
+        if not path.exists():
+            die(f"{local} does not exist here")
+        files.append((path, to or None))
+    cwd = os.path.realpath(os.getcwd())
+    local = {"home": str(Path.home()), "tmp": tempfile.gettempdir(), "uid": os.getuid(), "cwd": cwd}
+    meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "local": local,
+            "files": [{"from": str(p.resolve()), "to": to} for p, to in files]}  # fmt: skip
+    t0 = time.time()
+    with Progress() as bars:
+        st, code = None, []
+        if git_state(cwd):
+            task = bars.start("snapshot the code")
+            st, code = snapshot(cwd, False)
+            bars.done(
+                task,
+                f"code: {st['top']} at {st['head'][:12]}, {st['new_files']} new files, {st['unpushed']} unpushed commits",
             )
-        entries.append(("meta.json", json.dumps(meta, indent=1).encode()))
-        if a.dry_run:
-            files = [[arc, str(src) if isinstance(src, Path) else f"<{len(src)} bytes>"] for arc, src in entries]
-            print(json.dumps({"ssh": ssh_cmd(a.host, a.ssh) + [remote], "meta": meta, "files": files}, indent=1))
-            return
-        t = ui.task(f"send {len(entries)} files to {a.host} ({a.compress})", total=sum(size_of(s) for _, s in entries))
-        pipes = {"stdin": subprocess.PIPE, "stdout": subprocess.PIPE, "stderr": subprocess.PIPE}
-        ssh = subprocess.Popen(ssh_cmd(a.host, a.ssh) + [remote], **pipes)
-        err = []
-        threading.Thread(target=lambda: err.append(ssh.stderr.read()), daemon=True).start()
-        try:
-            if a.compress == "zstd":
-                z = subprocess.Popen(["zstd", "-T0", "-3", "-q", "-c"], stdin=subprocess.PIPE, stdout=ssh.stdin)
-                sink = z.stdin
-            else:
-                import gzip
-
-                z, sink = None, gzip.GzipFile(fileobj=ssh.stdin, mode="wb", compresslevel=1)
-            write_tar(sink, entries, lambda n: ui.advance(t, n))
-            sink.close()
-            if z:
-                z.wait()
-            ssh.stdin.close()
-        except BrokenPipeError:
-            pass
-        ui.done(t, f"sent {len(entries)} files to {a.host}")
-        t = ui.task(f"place them and open a window in tmux session {a.tmux_session}")
-        result = None
-        for raw in ssh.stdout:
-            line = raw.decode(errors="replace")
-            if line.startswith(MARK):
-                result = json.loads(line[len(MARK) :])
-        ssh.wait()
-        if result and not result.get("error"):
-            ui.done(t, f"opened {result['target']} on {a.host} in {result['dir']}")
-    if not result:
-        die(
-            f"the command on {a.host} failed (exit {ssh.returncode}):\n{b''.join(err).decode(errors='replace')[-2000:]}"
-        )
-    if result.get("error"):
-        die(f"on {a.host}: {result['error']}")
-    attach = shlex.join(["ssh", "-t", *shlex.split(a.ssh), a.host, "tmux", "attach", "-t", result["target"]])
+        result = send_once(a.host, entries(files, meta, code), bars)
+        if result.get("need_repo"):  # HOST cannot clone it: send the repository along
+            st, code = snapshot(cwd, True)
+            result = send_once(a.host, entries(files, meta, code), bars)
+            if result.get("need_repo"):
+                die(f"{a.host} could not clone the repository, even from the copy sent along")
     for n in result["notes"]:
         print(f"note    {n}")
-    if result["code"]:
-        print(f"code    {result['code']}")
-    for c in result.get("check") or []:
+    print(f"code    {result['code'] or '-'}")
+    for c in result["check"] or []:
         print(f"check   {c}")
-    print(f"stash   {result['stash']}")
-    print(f"time    {time.time() - t_start:.1f} s")
-    print(f"window  {result['target']}  ({attach})")
+    print(f"time    {time.time() - t0:.1f} s")
+    print(f"window  {result['window']}  (ssh -t {a.host} tmux attach -t {result['window']})")
     print(result["line"])
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("probe", help="print facts about HOST; change nothing")
-    s = sub.add_parser("send", help="copy, write the prompt, open a tmux window, print the resume line")
-    p.add_argument("host", nargs="?")
-    p.add_argument("--here", action="store_true", help="probe this machine instead of HOST")
+    p = sub.add_parser("probe", help="facts about HOST: the program, the working directory, clones; changes nothing")
+    p.add_argument("host")
+    p.add_argument("program", help="the agent's program, such as claude")
+    p.add_argument("dir", nargs="?", help="the working directory on HOST (default: the same path, under its home)")
+    s = sub.add_parser("send", help="move the session; print the line that resumes it")
     s.add_argument("host")
-    for x in (p, s):
-        x.add_argument("--ssh", default="", metavar="ARGS", help='extra ssh arguments, e.g. "-p 2222"')
-        x.add_argument("--python", default="python3", help="python on HOST (default python3)")
-    p.add_argument("--dir", help="report this directory: real path, git state, processes that run in it")
-    p.add_argument("--session", help="report processes on HOST whose command line has this id")
-    p.add_argument("--find-clone", action="append", default=[], metavar="URL", help="report clones of this URL")
-    p.add_argument("--search-root", action="append", default=[], metavar="DIR", help="where to look (default ~)")
-    p.add_argument("--bin", action="append", default=[], metavar="NAME", help="a program to find (tmux always)")
-    p.add_argument("--env", action="append", default=[], metavar="NAME", help="a variable of the login shell")
-    p.add_argument("--ls", action="append", default=[], metavar="PATH", help="a folder whose newest entries to list")
-    s.add_argument("--dir", required=True, help="working directory on HOST")
-    s.add_argument("--run", required=True, help="command that resumes the session; the prompt is its last argument")
-    s.add_argument("--prompt", required=True, help="first message to the resumed session")
-    s.add_argument("--put", action="append", default=[], metavar="LOCAL=REMOTE", help="copy a file or folder")
+    s.add_argument("files", nargs="+", metavar="FILE", help="a file or folder of the session, or LOCAL=REMOTE")
     s.add_argument(
-        "--merge", action="append", default=[], metavar="LOCAL=REMOTE", help="add files; keep differing ones"
+        "--run", required=True, help="the command that resumes the session; the prompt becomes its last argument"
     )
-    s.add_argument(
-        "--code",
-        metavar="LOCAL_DIR",
-        help="snapshot this git work tree; apply it in --dir if safe; if --dir is missing, clone the repository there first",
+    s.add_argument("--prompt", required=True, help="the first message to the resumed session")
+    s.add_argument("--dir", help="the working directory on HOST (default: the same path, under its home)")
+    w = sub.add_parser("wait", help="wait until a running session's turn ends; touch nothing")
+    w.add_argument("transcript")
+    w.add_argument("--end", required=True, metavar="REGEX", help="a line that ends a turn")
+    w.add_argument(
+        "--busy", required=True, metavar="REGEX", help="a line of work: a reply, a tool call, a user message"
     )
-    s.add_argument(
-        "--ship-repo", action="store_true", help="with --code: also send the whole repository, to clone from"
-    )
-    s.add_argument("--session", metavar="ID", help="the id in --run; the line is tried once with a made-up id")
-    s.add_argument("--path", action="append", default=[], metavar="DIR", help="put DIR first on PATH in the line")
-    s.add_argument("--tmux", default="tmux", help="tmux on HOST")
-    s.add_argument("--tmux-session", default="teleport", help="tmux session on HOST; created if missing")
-    s.add_argument("--window", help="tmux window name (default tp-<random>)")
-    s.add_argument("--stash", help="folder on HOST for this run (default ~/.cache/teleport/<time>-<random>)")
-    s.add_argument("--compress", choices=["zstd", "gzip"], default="gzip", help="zstd only if both sides have it")
-    s.add_argument("--dry-run", action="store_true", help="print what would be sent; send nothing")
     a = ap.parse_args()
-    (cmd_probe if a.cmd == "probe" else cmd_send)(a)
+    {"probe": cmd_probe, "send": cmd_send, "wait": cmd_wait}[a.cmd](a)
 
 
 if __name__ == "__main__":
     if sys.argv[1:2] == ["_probe"]:
         print(MARK + json.dumps(probe(json.loads(sys.argv[2]))), flush=True)
     elif sys.argv[1:2] == ["_land"]:
-        try:
-            land(sys.argv[2])
-        except Exception as e:  # report to the caller instead of a bare traceback
-            emit(event="done", error=f"{type(e).__name__}: {e}")
-            raise
+        land(sys.argv[2])
     else:
         main()
