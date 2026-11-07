@@ -23,7 +23,7 @@ Agents change where they keep sessions and which flags they take, so find each f
    - that the teleport is done and must not run again (if it moved itself: the tool call that ran it shows as interrupted);
    - what did not move: processes, subagents, background tasks, workflows, schedules and servers that were running (jobs on a shared scheduler keep running: give their IDs).
 
-   The script adds the rest: the code's state, what it did not send, and a last line that says to recover and continue.
+   The script adds the rest: the code's state, what it did not send, and a last line that says to recover: rebuild what was not sent, stop or pick up the jobs left running (not duplicate or ignore them), and continue.
 5. **Send,** in the session's working directory: `teleport.py send HOST <its files and folders> --run "<resume command>" --prompt "<prompt>" [--dir DIR]`. Its `note` lines show where each one landed. If one did not land where the host's agent keeps such files, send it again as `LOCAL=REMOTE`.
 6. **Check** its `check` lines: the resume line, tried on the host with a made-up id. An option error (unknown, unexpected or conflicting) means a wrong flag: fix `--run`, and send again. An error about the id or the terminal means that the line is good.
 7. **Reply** with only its last two lines (the window with its attach command, and the resume line), and say which copy is now stale. If you moved this session, make no more tool calls, even if the task is not done. If you moved another one, tell the user to exit it.
