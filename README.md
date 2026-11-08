@@ -7,5 +7,3 @@
 | [teleport](teleport) | Moves a Claude Code or Codex session, even a running one, to another machine over SSH, with its transcript, history, memory and notes, and types the line that resumes it into a tmux window there. |
 
 To move a session, tell Claude Code or Codex, from any machine: `Read https://raw.githubusercontent.com/netanel-haber/skills/main/teleport/SKILL.md and teleport us to <host>`.
-
-Each SKILL.md is at most 1,000 words (`wc -w */SKILL.md`).
