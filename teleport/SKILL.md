@@ -12,7 +12,7 @@ Move only what the session needs to resume: its transcript, history, memory and 
 
 Agents change where they keep sessions and which flags they take, so find each fact by looking. The examples at the end are hints from November 2026. Find only the facts that the steps ask for, with few commands.
 
-1. **Find the session.** It is this one, unless the user points at another: an id, a file, a phrase from it, or "the last session in <dir>".
+1. **Find the session.** It is this one, unless the user points at another: an id, a file, a phrase from it, or "the last session in `<dir>`".
    - Its files: search the agent's config folder (such as `~/.claude` or `~/.codex`) with `find <folder> -name '*<id>*'`, or `grep -rl '<phrase>' <folder>`. A phrase that you wrote in this turn finds this session. Take its transcript, everything else named after its id, its project's memory, and its scratchpad, where they exist.
    - Its working directory, model, effort and permission mode: the latest records of its transcript.
    - What it had running (jobs, subagents, background tasks, workflows, schedules): what its transcript shows. Do not investigate further.
