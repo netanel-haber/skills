@@ -54,7 +54,7 @@ import threading
 import time
 from pathlib import Path
 
-SKILL = "https://raw.githubusercontent.com/netanel-haber/skills/main/teleport/SKILL.md"
+SKILL = "netanel.dev/teleport"
 MARK = "@@TELEPORT@@"  # starts the line of JSON that the host sends back
 FAKE_ID = "00000000-0000-0000-0000-000000000000"
 ID = re.compile(r"\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b|\b[0-9a-f]{12,}\b")  # a session id in --run

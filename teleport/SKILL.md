@@ -5,13 +5,13 @@ argument-hint: "<host> [<dir>] [<session: id, path or phrase>]"
 ---
 
 > **Usage:** tell Claude Code or Codex, on any machine:
-> `Read https://raw.githubusercontent.com/netanel-haber/skills/main/teleport/SKILL.md and teleport us to <host>`
+> `Read netanel.dev/teleport and teleport us to <host>`
 
 The user names the host, and maybe a directory or a session. Decide the rest, and ask only where a step says so. Do every step.
 
 Move only what the session needs to resume: its transcript, history, memory and notes. Do nothing with the project: no building, cloning, installing or copying it. The resumed session sets up what it needs.
 
-`teleport.py` does the mechanics and knows nothing about agents. It is next to this file; if you read this from a URL, it is at the same URL with `teleport.py` in place of `SKILL.md`: download it. Read its docstring first. If a part does not fit, change the script or do that part by hand. Run it as `uv run --no-project --script <path>` (or `python3 <path>`), outside any sandbox, in the session's working directory.
+`teleport.py` does the mechanics and knows nothing about agents. It is next to this file, and at https://raw.githubusercontent.com/netanel-haber/skills/main/teleport/teleport.py: download it if you read this from a URL. Read its docstring first. If a part does not fit, change the script or do that part by hand. Run it as `uv run --no-project --script <path>` (or `python3 <path>`), outside any sandbox, in the session's working directory.
 
 Agents change where they keep sessions and which flags they take, so find each fact by looking. The examples at the end are hints from November 2026. Find only the facts that the steps ask for, with few commands.
 
