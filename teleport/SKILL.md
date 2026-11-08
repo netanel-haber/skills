@@ -4,6 +4,9 @@ description: "Move a coding-agent session (Claude Code, Codex or another; this o
 argument-hint: "<host> [<dir>] [<session: id, path or phrase>]"
 ---
 
+> **Usage:** tell Claude Code or Codex, on any machine:
+> `Read https://raw.githubusercontent.com/netanel-haber/skills/main/teleport/SKILL.md and teleport us to <host>`
+
 The user names the host, and maybe a directory or a session. Decide the rest, and ask only where a step says so. Do every step.
 
 Move only what the session needs to resume: its transcript, history, memory and notes. Do nothing with the project: no building, cloning, installing or copying it. The resumed session sets up what it needs.
