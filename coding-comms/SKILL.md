@@ -1,12 +1,12 @@
 ---
 name: coding-comms
-description: "Write and review text about code: PR and commit messages, reviews, issues, comments, docstrings, release notes and design docs."
+description: "Write and review text about code: PR and commit messages, reviews, issues, comments, docstrings, release notes, design docs and answers to questions."
 ---
 
 Follow the user's instructions first, then the project's rules and recent style (such as title prefixes), then this skill. Do every step.
 
 1. **Read the whole change**, then **list the facts** the reader needs and cannot see in it: what it does, why, costs, limits, what was and was not tested, and measured numbers with their setup. Put each change on its own line. Mark it **major** if a user would notice it or search for it: a new API, platform, format or type, changed behavior or results, a removed feature, or a measured speedup.
-2. **Draft** from the template below. Write very simply: common words, exact technical terms, short sentences with one idea each, active voice. Do not use the instantaneous present ("I check the logs now"); write "I'll check the logs".
+2. **Draft** from the template below. Write very simply: common words, exact technical terms, short sentences with one idea each, active voice. Use the passive when it puts the thing the reader asked about first: "Requests are split between the workers", not "Each worker handles 1/4 of the requests". Do not use the instantaneous present ("I check the logs now"); write "I'll check the logs".
 3. **Cut** each sentence that:
    - repeats the code, the diff or the docstrings: types, layouts, encodings, formulas, the contract;
    - explains internals, or why the code is this way (tell the user if the code lacks that reason);
@@ -17,8 +17,9 @@ Follow the user's instructions first, then the project's rules and recent style 
    - Write the title last. Name every major change with its scope: "Windows builds for the CLI", not "Windows support". Shorten the words, never the list; above about 90 characters, tell the user to consider a split. Keep it natural: "Add retry support to the upload client", not "Add retry counts and timeouts to the upload client".
    - Start the body with what the change does, not with "This PR".
    - Define any name you made up. The reader did not see your work.
+   - Use only the markup that the destination renders. If you cannot test it, write plain text and say so.
    - In anything public, commits included, remove secrets, personal data, internal paths, hosts, ticket IDs and unreleased products. If unsure, treat it as public.
-5. **Show** the full draft before you publish, unless you were told to publish. If no one can answer, return the draft.
+5. **Show** the full draft before you publish, unless you were told to publish. If no one can answer, return the draft. After each revision, show the whole text again.
 
 ## Templates
 
@@ -30,6 +31,7 @@ Tested: <what ran, where, the result, and what was not tested.>
 <Only if measured: the setup, then before and after.>
 ```
 
+- Answer to a question: the answer first, in the asker's words, at about the question's length. Do not repeat or deny what the asker already said.
 - Review reply: per point, one to three sentences: what changed and where, or why not. Thank a person at most once.
 - Review comment: the problem, why, the fix, and whether it blocks.
 - Maintainer request: what you need, why, and what you tried.
