@@ -1,3 +1,5 @@
+# Skills
+
 | Skill |  |
 |---|---|
 | [sem-compress](sem-compress) | Makes code smaller. It removes repetition, dead code and needless layers, and it keeps every feature. |
@@ -8,6 +10,6 @@
 
 To move a session, tell Claude Code or Codex, from any machine: `Read netanel.dev/teleport and teleport us to <host>`.
 
-Rules for agents that change this repo:
+# Changing a skill
 
-- Keep every skill generic. Do not fit a skill to the case that prompted the change. Add a rule only if it also holds in other projects, tools and fields. Write the rule and its examples without the details of that case.
+Keep every skill generic: do not overfit it to the case that prompted a change. A rule or an example belongs in a skill only if it also holds in other projects, tools and fields.
