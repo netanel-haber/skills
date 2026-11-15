@@ -17,6 +17,7 @@ Follow the user's instructions first, then the project's rules and recent style 
    - Write the title last. Name every major change with its scope: "Windows builds for the CLI", not "Windows support". Shorten the words, never the list; above about 90 characters, tell the user to consider a split. Keep it natural: "Add retry support to the upload client", not "Add retry counts and timeouts to the upload client".
    - Start the body with what the change does, not with "This PR".
    - Define any name you made up. The reader did not see your work.
+   - Read the draft as someone who knows the project but did not see your work. They must be able to say what the change does and why. If they cannot, add the missing sentence in their words.
    - Use only the markup that the destination renders. If you cannot test it, write plain text and say so.
    - In anything public, commits included, remove secrets, personal data, internal paths, hosts, ticket IDs and unreleased products. If unsure, treat it as public.
 5. **Show** the full draft before you publish, unless you were told to publish. If no one can answer, return the draft. After each revision, show the whole text again.
