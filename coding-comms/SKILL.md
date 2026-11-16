@@ -35,6 +35,7 @@ Tested: <what ran, where, the result, and what was not tested.>
 - Answer to a question: the answer first, in the asker's words, at about the question's length. Do not repeat or deny what the asker already said.
 - Review reply: per point, one to three sentences: what changed and where, or why not. Thank a person at most once.
 - Review comment: the problem, why, the fix, and whether it blocks.
+- Note for a reviewer next to a change: what it changes and what it was before, then only what the reviewer must decide or check.
 - Maintainer request: what you need, why, and what you tried.
 - Issue: the problem as the title. For a bug: what happened, what you expected, versions and a minimal repro. Report security problems privately.
 - Code comment: why, only where not obvious.
