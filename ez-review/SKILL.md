@@ -34,6 +34,7 @@ For a diff that is not a GitHub PR (a merge request on a different host, a local
    - Write `notes-N/agent/notes.json`. Every hunk must have a note.
    - If there are more than approximately 40 hunks, use parallel subagents. Give each subagent one PR or one group of files.
    - Give each subagent the brief, the full paths of its chunk files, the source tree and its output path. Subagents often cannot list folders.
+   - Give each subagent its own output file. A later file replaces the same fields of an earlier file, so a subagent that rewrites some notes writes only those entries.
    - Tell the subagents to use only read tools.
 
 4. **Write the overviews.** Copy the `"overview"` text of each notes file into `overview-N.md`. For a stack, put a short primer at the top of the first overview.
@@ -52,7 +53,12 @@ For a diff that is not a GitHub PR (a merge request on a different host, a local
    - When the user pastes a note or a draft and asks for a new version, write the new text in a later notes file, for example `notes-N/zz_manual/notes.json`. A later file replaces the same fields of an earlier file.
    - Make the page again, and show the new text to the user.
 
-8. **Update for new commits.** Make the diff again. Run `carry` to move the notes to the new diff. Write new notes only for the hunks that `carry` shows as "changed" or "new". A note describes the code as it is now: the page marks the changed hunks, so a note does not tell what changed since the last version of the page.
+8. **Update for new commits.**
+   - Make the diff again. Run `carry` to move the notes to the new diff, and set `"since"` in the config to the last reviewed commit.
+   - Keep the `prev` and `change` fields that `carry` writes. The page uses them to keep the viewed marks of hunks that only moved, and to show the changed hunks as not viewed.
+   - Write new notes for the hunks that `carry` shows as "changed" or "new". The note of a changed hunk starts with one sentence, "**Changed since <commit>:**", that tells what changed and why. The rest of the note describes the code as it is now.
+   - Read the notes of the "moved" and "unchanged" hunks too: a change in a different hunk can make them false. Correct them without a "Changed since" sentence.
+   - Hunk numbers change. Update the `hunks:` lines of the order file and the hunk numbers in the overview.
 
 9. **Record posted comments.**
    - When the user posts a draft, set `"posted_url"` on its `ask`. The draft then goes out of the To do list.
@@ -121,7 +127,7 @@ Rules:
 - Do not use fixed headings, "none" entries, or a list of what you did not examine. If a point that you did not examine is important, write it under Check as one sentence.
 - In review mode, do not go through the lines one by one, and do not repeat the code: types, shapes, formulas, argument lists. Give a line number only if the reader must find one line.
 - If the diff does not show a name, tell what it is in a few words.
-- Describe the code as it is now. Do not tell the history of your work, of earlier commits or of this page.
+- Describe the code as it is now. Do not tell the history of your work or of this page. One exception: if the task gives a commit that the reader already reviewed, the note of a hunk that changed since then starts with one sentence, "**Changed since <commit>:**", that tells what changed and why.
 - Use only the markup that the page renders. The list is at the top of `ez_review.py`. The page does not render tables: use a list.
 - Give the name of the thing. Do not use "it" or "this" if the reader cannot see what it is.
 - Do not give compliments.
