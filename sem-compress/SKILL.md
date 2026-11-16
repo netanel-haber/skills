@@ -19,6 +19,7 @@ Make the code smaller in substance, not in appearance. A change counts only if t
 - Delegate to primitives the language, platform or project already has instead of reimplementing them.
 - Replace special cases with the general path when the general path already handles them correctly.
 - Prefer early returns and flat flow over nested conditionals when it removes branches.
+- In tests, also remove redundant testing: a test, case or parametrization whose code path, kind of input and assertion another test already covers, and checks that an end-to-end comparison already catches. Keep the only test of a path, format or route, and report each removal with what still covers it.
 
 ## What does not count
 
@@ -26,6 +27,8 @@ Make the code smaller in substance, not in appearance. A change counts only if t
 - Macros, code generators, metaprogramming, decorators or helper DSLs whose expansion is the same amount of code (or more, or harder to follow). Judge every abstraction by its expanded form: the preprocessed source, the generated code, the compiled or bundled output, the CSS after cascade.
 - Moving code to another file, package or config so the target looks smaller.
 - Trading clarity for brevity: tricks whose correctness needs a proof, parameters only one caller uses, coupling to another function's incidental behavior, extra runtime cost, extra stack or memory, new side effects.
+
+Test code must stay the most plainly readable code: a reader follows each test top to bottom (inputs, the call, the expected result), with no helper, table or one-liner that hides what it does. If a test file stays long and hard to follow, its design needs to change (simpler fixtures, one reference, fewer properties per test), not only its text.
 
 Never make the code even slightly worse to save lines. Stop when the next change would only hide structure.
 
