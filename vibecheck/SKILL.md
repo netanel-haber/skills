@@ -4,7 +4,7 @@ description: "Keeps a coding agent (Claude Code, Codex or another) from hanging:
 ---
 
 > **Usage:** tell Claude Code or Codex, at the start of a session or after a hang:
-> `Read netanel.dev/vibecheck and vibecheck this session`
+> `Read netanel.dev/vibe and vibecheck this session`
 
 A session hangs when it waits for something that will not come: a command that never ends, a prompt nobody answers, a reply that never arrives. While it waits, it reads nothing, not even its own watchdog. So every wait gets a bound, and a watchdog catches what slips through. Follow these rules for the rest of the session.
 
