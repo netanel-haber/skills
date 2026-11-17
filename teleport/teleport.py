@@ -9,14 +9,17 @@
 
     teleport.py probe HOST PROGRAM [DIR]                     facts about HOST; changes nothing
     teleport.py send HOST FILE... --run CMD --prompt TEXT    move the session; print how to resume it
+                                       [--dir DIR] [--cut REGEX] [--setup CMD]
 
 Run both in the session's working directory, as `uv run --no-project --script teleport.py ...` (uv then
 installs rich for the progress bars, at its versions of the date above, and never touches the project
 there), or with python3. The working directory on HOST is DIR (--dir), or else the same path, under
-HOST's home; send creates it if it is missing, and does nothing else with the project there. send:
+HOST's home; a path outside the home here that HOST lacks becomes HOST's ~/<its name>. send creates it if
+it is missing, and does nothing else with the project there. send:
 - copies each FILE (a file or a folder of the session) to the same place on HOST: HOST's home, temp
   folder, uid and working directory take the place of this machine's, also where the working directory
-  is written into a folder name (with / or each non-alphanumeric as -). LOCAL=REMOTE names the place
+  is written into a folder name (with / or each non-alphanumeric as -); a folder named after a parent
+  of the working directory gets the name of the same parent of HOST's. LOCAL=REMOTE names the place
   instead. A file replaces HOST's copy, and a folder is merged; where both sides have a file, the newer
   one wins, and the other goes to the stash, ~/.cache/teleport/<run> on HOST.
 - sends each transcript (a .jsonl file) up to its last complete line or, with --cut REGEX, up to its
@@ -26,6 +29,8 @@ HOST's home; send creates it if it is missing, and does nothing else with the pr
   then any folder whose remaining files still pass 50 MiB. Transcripts always go.
 - writes the prompt to a file. It adds where the old working directory is, whether a running turn was
   cut, what was left out, and a last line: "You have been teleported using <this skill's link>. ...".
+- runs --setup on HOST first, if given (such as the agent's installer), and skips a program that
+  reports no version (a stub that only says it is not installed).
 - opens a tmux window in the working directory, tries the resume line once with a made-up session id
   (a wrong flag fails, and no session starts), types the resume line into the window without running
   it, and prints how to attach. It also notes when HOST's program is older than the one here.
@@ -63,7 +68,7 @@ REBUILT = {"node_modules", "__pycache__", ".venv", "venv", "site-packages", ".ca
            ".pytest_cache", ".tox", ".gradle", ".next", "target", "build", "dist"}  # fmt: skip
 ARTIFACTS = {".whl", ".so", ".o", ".a", ".pyc", ".pt", ".pth", ".bin", ".safetensors", ".ckpt", ".npy", ".npz",
              ".onnx", ".engine", ".tar", ".gz", ".tgz", ".zip", ".xz", ".zst", ".bz2", ".deb", ".rpm"}  # fmt: skip
-BIG, BIG_FOLDER, STASH_DAYS = 10 * 2**20, 50 * 2**20, 14
+BIG, BIG_FOLDER, STASH_DAYS, SETUP_SECONDS = 10 * 2**20, 50 * 2**20, 14, 900
 BIN_DIRS = ["~/.local/bin", "~/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.volta/bin", "~/.cargo/bin",
             "~/.nvm/versions/node/*/bin", "~/.local/share/fnm/node-versions/*/installation/bin",
             "/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]  # fmt: skip
@@ -87,9 +92,15 @@ def version_of(path, flag="--version"):
 
 
 def host_dir(given, cwd, local_home, host_home):
-    """The working directory on HOST: GIVEN, or else the same path, under HOST's home."""
+    """The working directory on HOST: GIVEN, or else the same path under HOST's home. A path outside the
+    home here stays as it is if HOST has it, and else becomes HOST's ~/<its name> (another machine often
+    lacks this one's shared file systems)."""
+    if given:
+        return os.path.expanduser(given)
     rel = os.path.relpath(cwd, local_home)
-    return os.path.expanduser(given or (cwd if rel.startswith("..") else os.path.join(host_home, rel)))
+    if not rel.startswith(".."):
+        return os.path.join(host_home, rel)
+    return cwd if os.path.isdir(cwd) else os.path.join(host_home, os.path.basename(cwd))
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -185,7 +196,20 @@ def mapper(local, host):
     subs.update({local["home"]: host["home"], local["tmp"]: host["tmp"]})
     keys = sorted((k for k in subs if k), key=len, reverse=True)
     pattern = re.compile("|".join(map(re.escape, keys)) + rf"|(?<![0-9]){local['uid']}(?![0-9])")
-    return lambda p: pattern.sub(lambda m: subs.get(m.group(0), str(host["uid"])), p)
+    # A folder named after a parent of the working directory (an agent may keep memory there) gets
+    # the name of the same parent of HOST's working directory: N levels up here, N levels up there.
+    names = {}
+    for here, there in zip(Path(local["cwd"]).parents, Path(host["cwd"]).parents):
+        if here.parent == here or there.parent == there:
+            break
+        for enc in (lambda p: p.replace("/", "-"), lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)):
+            names.setdefault(enc(str(here)), enc(str(there)))
+
+    def to_host(p):
+        p = pattern.sub(lambda m: subs.get(m.group(0), str(host["uid"])), p)
+        return "/".join(names.get(part, part) for part in p.split("/"))
+
+    return to_host
 
 
 def place(src, dst, keep, notes):
@@ -262,6 +286,10 @@ def land(stash):
     d = host["cwd"] = os.path.realpath(host_dir(meta["dir"], local["cwd"], local["home"], host["home"]))
     os.makedirs(d, exist_ok=True)
     to_host, notes, placed = mapper(local, host), [], []
+    if meta.get("setup"):
+        r = sh(["bash", "-lc", meta["setup"]], timeout=SETUP_SECONDS, cwd=d)
+        tail = [x for x in (r.stdout + r.stderr).splitlines() if x.strip()][-3:]
+        notes.append(f"setup exited {r.returncode}: " + " | ".join(tail))
     for i, f in enumerate(meta["files"]):
         dst = Path(os.path.expanduser(f["to"] or to_host(f["from"])))
         place(stash / "files" / str(i), dst, stash / "replaced" / str(i), notes)
@@ -287,7 +315,9 @@ def land(stash):
     )
     program = next(w for w in shlex.split(meta["run"]) if "=" not in w)
     found = (in_window(f"command -v {shlex.quote(program)}") or "").strip()
-    path = found if found.startswith("/") else next((p["path"] for p in find_program(program)), "")
+    if found.startswith("/") and not version_of(found)[1]:
+        found = ""  # a stub or a broken install, such as a site's "not installed" message
+    path = found or next((p["path"] for p in find_program(program) if p["version"]), "")
     host_version = version_of(path) if path else (None, ())
     if host_version[1] and meta["version"][1] and host_version[1] < tuple(meta["version"][1]):
         notes.append(
@@ -446,7 +476,10 @@ def ssh_cmd(host):
     opts = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=20"]
     if not re.search(r"^controlpath (?!none$)", sh(["ssh", "-G", host]).stdout.lower(), re.M):
         ctl = os.path.join(tempfile.gettempdir(), "teleport-ssh-%C")
-        opts += ["-o", "ControlMaster=auto", "-o", f"ControlPath={ctl}", "-o", "ControlPersist=60"]
+        shared = ["-o", "ControlMaster=auto", "-o", f"ControlPath={ctl}", "-o", "ControlPersist=60"]
+        r = sh(["ssh", *opts, *shared, host, "true"], timeout=60)
+        # A sandbox can forbid the socket of a shared connection ("muxclient: socket(): ..."): go without.
+        opts += ["-o", "ControlPath=none"] if r.returncode and "mux" in r.stderr.lower() else shared
     return ["ssh", *opts, host]
 
 
@@ -483,7 +516,7 @@ def cmd_send(a):
     here = shutil.which(program)
     local = {"host": socket.gethostname(), "home": str(Path.home()), "tmp": tempfile.gettempdir(),
              "uid": os.getuid(), "cwd": os.path.realpath(os.getcwd())}  # fmt: skip
-    meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "local": local, "version": version_of(here) if here else (None, ()),
+    meta = {"run": a.run, "prompt": a.prompt, "dir": a.dir, "setup": a.setup, "local": local, "version": version_of(here) if here else (None, ()),
             "files": [{"from": str(p.resolve()), "to": to} for p, to in files]}  # fmt: skip
     items, t0 = bundle(files, meta, re.compile(a.cut) if a.cut else None), time.time()
     total = sum(len(d) if d is not None else p.lstat().st_size for _, p, d in items)
@@ -535,6 +568,7 @@ def main():
     s.add_argument("--prompt", required=True, help="the first message to the resumed session")
     s.add_argument("--dir", help="the working directory on HOST (else the same path, under its home)")
     s.add_argument("--cut", metavar="REGEX", help="send each transcript up to its last line that matches: a turn's end")
+    s.add_argument("--setup", metavar="CMD", help="run on HOST (bash -lc, in the working directory) before the program is looked up: install it there")
     a = ap.parse_args()
     (cmd_probe if a.cmd == "probe" else cmd_send)(a)
 
