@@ -332,7 +332,10 @@ def sendable(root, left_out):
     def visit(d):
         files, size, lost = [], 0, []
         for e in sorted(d.iterdir()):
-            if e.is_dir() and not e.is_symlink():
+            if e.is_symlink():  # its target may be unreadable or outside the session
+                lost.append(str(e))
+                continue
+            if e.is_dir():
                 if marked(e):
                     lost.append(f"{e}/")
                     continue
@@ -341,7 +344,7 @@ def sendable(root, left_out):
                     lost.append(f"{e}/")
                 else:
                     files, size, lost = files + sub_files, size + sub_size, lost + sub_lost
-            elif e.is_file() and not e.is_symlink() and artifact(e):
+            elif e.is_file() and artifact(e):
                 lost.append(str(e))
             else:
                 files.append(e)
