@@ -1,6 +1,6 @@
 ---
 name: teleport
-description: "Move a coding-agent session (Claude Code, Codex or another; this one, or another one, even while it runs) to another machine over SSH, ready to continue in tmux there, with its transcript, history, memory and notes. Use when the user says \"teleport us to <host>\" or asks to continue a session on another machine."
+description: "Move a coding-agent session (Claude Code, Codex or another; this one, or another one, even while it runs) to another machine over SSH, ready to continue in tmux there, or as a tar, with its transcript, history, memory and notes. Use when the user says \"teleport us to <host>\" or asks to continue a session on another machine."
 argument-hint: "<host> [<dir>] [<session: id, path or phrase>]"
 ---
 
@@ -32,6 +32,13 @@ Agents change where they keep sessions and which flags they take, so find each f
 5. **Send,** in the session's working directory: `teleport.py send HOST <its files and folders> --run "<resume command>" --prompt "<prompt>" [--dir DIR] [--cut <regex>] [--setup "<install command>"]`. `--setup` runs on the host before the program is looked up; make it do nothing where the program already works. Its `note` lines show where each one landed. If one did not land where the host's agent keeps such files, send it again as `LOCAL=REMOTE`.
 6. **Check** its `check` lines: the resume line, tried on the host with a made-up id. An option error (unknown, unexpected or conflicting) means a wrong flag: fix `--run`, and send again. An error about the id or the terminal means that the line is good.
 7. **Reply** with its last line (the command that attaches to the window, where the resume line is typed in: the user runs it in their own terminal, not in the agent's shell, and presses Enter), any `note` that the user must act on (such as an older version on the host), and which copy is now stale. If you moved this session, make no more tool calls, even if the task is not done. If you moved another one, tell the user to exit it.
+
+## As a tar
+
+Use this when the user asks for a tar, or when no SSH connection can be made.
+
+- **Pack.** Do steps 1, 3 and 4. Put into one `.tgz`: each file of the session under a folder that says where it came from, each transcript up to its last complete line, and a `TELEPORT.md` that says where each file goes (named after the working directory there), the resume command and the prompt. Give the user its path and one line for the agent on the other machine: `Read netanel.dev/teleport and unpack <path of the tar there>`, with the command that copies the tar there if the user needs one.
+- **Unpack.** Unpack the tar into a new empty folder and follow its `TELEPORT.md`. Put each file where this machine's agent keeps it for the working directory here. Merge folders: where both sides have a file, keep the newer one and move the other to `~/.cache/teleport/`. Check the resume command's flags against the help here, then do step 7: the user runs the command in their own terminal and exits you.
 
 ## Examples (November 2026: Claude Code 2.1, Codex 0.166)
 
