@@ -22,11 +22,11 @@ Follow the user's instructions first, then the host project's look and rules, th
    - Order the sections: the answer, its conditions, the evidence, the method.
    - Use one 4 px grid. Keep prose to 72 characters per line.
 4. **Cut:**
-   - decoration: gradients, glows, shadows, emoji, and icons that repeat their label;
+   - decoration: gradients, glows, shadows, emoji, and icons that repeat their label (depth that shows a state, such as a pressed key, stays);
    - sentences where a labeled value would do, and text that repeats the data or a label;
    - rows that do not earn their height, internal settings, sales words and placeholder text;
    - digits that the measurement does not support, controls that do nothing, and colors without a meaning.
-5. **Build** with the host's stack, or with no host, one HTML file with inline CSS and JS. Put the data in one object, and make every view from it. Use inline SVG for small charts. Label mock data once, near the top.
+5. **Build** with the host's stack, or with no host, one HTML file with inline CSS and JS. Put the data in one object, and make every view from it. Use inline SVG for small charts. Label mock data once, near the top. Build only what shows: a hidden view and a closed menu, dialog or tooltip have no elements. Prefetch the data of what the reader may open next, never its DOM.
 6. **Check in a browser, and look at every screenshot.**
    - At 1920, 1440, 1024 and 390 px wide: no horizontal scroll, clipped text or overlap.
    - Open each state from its URL: default, hover, focus, empty, error, loading and each data state.
@@ -42,6 +42,20 @@ Follow the user's instructions first, then the host project's look and rules, th
 - Use one accent color, exactly the brand color if there is one, only for the primary action, the selection and links.
 - Use two font weights and at most four text sizes. Make hierarchy with size and weight, not with color.
 - Use a monospace font for code and identifiers, and tabular figures for numbers in a column.
+- Make each kind of control one component, and each kind of shape one corner radius, from the host's tokens. A shape inside another is concentric with it. A control that switches something serious, such as a command, is nearly square; a small tag is a pill.
+- Give a new part the polish of the parts around it, no more.
+- A selected or pressed item is solid, at least the size of the others, and stands out from its background at a glance. Keep its depth subtle.
+
+## Stability
+
+- Nothing moves that does not have to. A change in one part moves nothing outside it, not even by a pixel. A control's room is that of its widest state. Items in one row start at one top.
+- Check this with the boxes' exact positions (`getBoundingClientRect`) before and after each change, not by eye: a rounded size can jitter by one pixel.
+
+## Text that does not fit
+
+- Never cut a fact that the reader needs: wrap it whole.
+- Show a list of similar names grouped, their shared parts once (`run_{a,b}_v2`), with every name whole on hover. A line too long for its box fades out at its end.
+- A field shows a value's readable form at rest, and its raw text while it is edited.
 
 ## Numbers and tables
 
@@ -62,6 +76,7 @@ Follow the user's instructions first, then the host project's look and rules, th
 
 - The copy button copies exactly the command on the screen, and confirms with a word. Draw labels with CSS, so that a selection copies only the command.
 - Put environment variables first, then one flag on each line. Pin the version: an image digest or a commit.
+- A command to copy has nothing of the machine that ran it, such as a path or a host. Show what was left out, marked, near the command; never drop it in silence.
 
 ## States
 
@@ -72,7 +87,7 @@ Follow the user's instructions first, then the host project's look and rules, th
 ## Controls and links
 
 - Use native elements with a visible focus ring. Give each hover effect to keyboard focus too.
-- Link every external thing that has a page, such as the release, the commit or the source run.
+- Link every external thing that has a page, such as the release, the commit or the source run, even a page that only an internal network opens.
 - Keep the selection in the URL, as names that say what they are (`view=latency`), not indices. One function reads and writes the address.
 - A link that does not make sense opens the closest view under a red banner that lists each bad part.
 
@@ -96,7 +111,7 @@ Follow the user's instructions first, then the host project's look and rules, th
    - for an animation, a few frames at different points of its cycle.
 
    Crop and enlarge only to find what you saw at real size, never instead of it. What is clean when enlarged can be mush, stripes or moiré at its real size.
-3. **Critique the pixels, not numbers.** A count of frames that change, a pixel diff, a passing test or a matching hash says that something moves or loads, not that it looks right. For each screenshot, ask: does it read as what it is meant to be at this size? Is anything clipped, blurred, striped, faint, misaligned, overlapping or broken? Would the user stop at it?
+3. **Critique the pixels, not numbers.** A count of frames that change, a pixel diff, a passing test or a matching hash says that something moves or loads, not that it looks right. For each screenshot, ask: does it read as what it is meant to be at this size? Is anything clipped, blurred, jagged, striped, faint, misaligned, overlapping or broken? Would the user stop at it?
 4. **Fix each problem you would not show,** then peek again at what the fix touches. A fix to one state can break another; look at the others too.
 5. **Tell the user** in one line what the peek found and what you fixed, or that it found nothing, with the size and the place you looked at. Never say that something looks right without a peek behind it.
 
