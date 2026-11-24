@@ -29,6 +29,7 @@ import subprocess
 import sys
 import time
 import urllib.request
+from pathlib import Path
 
 AGENT = r"claude|codex"
 ALLOW = r"mcp|language[-_]server|lsp\b|vibecheck"
@@ -49,14 +50,18 @@ def processes() -> Procs:
         text=True,
         timeout=10,
     )
+    # ps can show a process that has just started with a negative age, wrapped to a huge one: no age is over the uptime.
+    uptime = Path("/proc/uptime")
+    longest = float(uptime.read_text().split()[0]) if uptime.exists() else float("inf")
     procs = {}
     for line in out.stdout.splitlines():
         parts = line.split(None, 3)
         if len(parts) >= 3:
             pid, ppid, etime = parts[:3]
+            age = seconds(etime)
             procs[int(pid)] = (
                 int(ppid),
-                seconds(etime),
+                age if age <= longest else 0,
                 parts[3] if len(parts) > 3 else "",
             )
     return procs
@@ -117,7 +122,8 @@ def stuck(root: int, procs: Procs, me: int, opts) -> list:
     allow = re.compile(opts.allow)
     over = {}
     for pid, (_, secs, args) in procs.items():
-        if pid in skip or root not in ancestors(pid, procs) or allow.search(args):
+        mine = me in ancestors(pid, procs)  # the watchdog's own ps
+        if pid in skip or mine or root not in ancestors(pid, procs) or allow.search(args):
             continue
         limit = deadline(pid, procs)
         if secs > (limit + opts.grace if limit is not None else opts.limit):
