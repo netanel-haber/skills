@@ -8,7 +8,7 @@ Follow the user's instructions first, then the project's rules and recent style 
 1. **Read the whole change**, then **list the facts** the reader needs and cannot see in it: what it does, why, costs, limits, what was and was not tested, and measured numbers with their setup. Put each change on its own line. Mark it **major** if a user would notice it or search for it: a new API, platform, format or type, changed behavior or results, a removed feature, or a measured speedup.
 2. **Draft** from the template below. Write very simply: common words, exact technical terms, short sentences with one idea each, active voice. Use the passive when it puts the thing the reader asked about first: "Requests are split between the workers", not "Each worker handles 1/4 of the requests". Do not use the instantaneous present ("I check the logs now"); write "I'll check the logs".
 3. **Cut** each sentence that:
-   - repeats the code, the diff or the docstrings: types, layouts, encodings, formulas, the contract;
+   - repeats the code, the diff or the docstrings: types, layouts, encodings, formulas, the contract, and the names of functions, classes and files, unless the change is that API;
    - explains internals, or why the code is this way (tell the user if the code lacks that reason);
    - explains what the field knows, such as why a cache speeds up reads or a smaller format saves memory;
    - tells the story of your work, or uses sales words such as "robust".
@@ -32,7 +32,11 @@ Tested: <what ran, where, the result, and what was not tested.>
 <Only if measured: the setup, then before and after.>
 ```
 
-- Answer to a question: the answer first, in the asker's words, at about the question's length. Do not repeat or deny what the asker already said.
+Keep a PR or commit body to about 100 words: each bullet one sentence of at most about 20 words, and Tested in one or two sentences. A longer one is cut, not split into more bullets.
+
+- Answer to a question: the answer first, in the asker's words, at about the question's length. Do not repeat or deny what the asker already said. Asked what to change or what is left: only that list, a line each; offer the evidence in one line.
+- Status: done or not first, then what is left and when it will end.
+- Words in a UI (a label, a note, a tooltip, a reason): a noun phrase or a short fact ("not checked yet", "2 × 4 GPUs"), never a sentence about the page or how to use it.
 - Review reply: per point, one to three sentences: what changed and where, or why not. Thank a person at most once.
 - Review comment: the problem, why, the fix, and whether it blocks.
 - Note for a reviewer next to a change: what it changes and what it was before, then only what the reviewer must decide or check.
